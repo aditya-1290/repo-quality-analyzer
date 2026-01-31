@@ -1,6 +1,11 @@
 from pathlib import Path
 from typing import Dict
 from .base import BaseAnalyzer, AnalyzerResult
+from .base import BaseAnalyzer, AnalyzerResult
+from .loc.counter import count_repository
+from .loc.models import LOCAggregate
+from .loc.statistics import compute_statistics
+from .loc.report import build_report
 
 CODE_EXTENSIONS = (
     ".py", ".js", ".ts", ".java", ".go", ".rs",
@@ -34,4 +39,19 @@ class LOCAnalyzer(BaseAnalyzer):
             name="loc",
             score=score,
             details=totals
+        )
+
+class LOCAnalyzers(BaseAnalyzer):
+    def analyze(self) -> AnalyzerResult:
+        files = count_repository(self.repo_path)
+        agg = LOCAggregate(files)
+        stats = compute_statistics(agg)
+        report = build_report(agg, stats)
+
+        score = min(1.0, agg.code_lines / 10000) if agg.code_lines else 0.0
+
+        return AnalyzerResult(
+            name="loc",
+            score=score,
+            details=report
         )
