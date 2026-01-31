@@ -172,3 +172,114 @@ def test_scan_without_permissions(fs_repo: Path):
     result = scan_without_permissions(fs_repo)
     assert len(result.files) > 0
 
+# =============================================================================
+# Summaries & filters
+# =============================================================================
+
+def test_summarize_scan_result(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+    summary = summarize_scan_result(result)
+
+    assert summary["total_files"] > 0
+    assert summary["total_size_bytes"] > 0
+
+
+def test_filter_large_files(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+    large = filter_large_files(result.files, min_size_bytes=1)
+    assert len(large) > 0
+
+
+def test_filter_by_depth(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+    shallow = filter_by_depth(result.directories, max_depth=1)
+    assert all(d.depth <= 1 for d in shallow)
+
+
+def test_sort_files_by_size(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+    sorted_files = sort_files_by_size(result.files)
+    assert sorted_files[0].size_bytes >= sorted_files[-1].size_bytes
+
+
+def test_sort_directories_by_size(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+    aggregated = aggregate_directory_metadata(
+        result.files, result.directories
+    )
+    sorted_dirs = sort_directories_by_size(aggregated)
+    assert sorted_dirs[0].total_size_bytes >= sorted_dirs[-1].total_size_bytes
+
+
+# =============================================================================
+# Limits & truncation
+# =============================================================================
+
+def test_enforce_limits_on_result(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+    limited = enforce_limits_on_result(result, max_files=1)
+
+    assert len(limited.files) == 1
+
+
+def test_truncate_errors():
+    result = ScanResult(errors=[str(i) for i in range(100)])
+    truncated = truncate_errors(result, max_errors=10)
+    assert len(truncated.errors) == 10
+
+
+# =============================================================================
+# Orchestration
+# =============================================================================
+
+def test_perform_scan_basic(fs_repo: Path):
+    result, meta = perform_scan(fs_repo)
+
+    assert meta["files_scanned"] > 0
+    assert meta["elapsed_seconds"] >= 0.0
+
+
+def test_perform_scan_no_permissions(fs_repo: Path):
+    result, meta = perform_scan(
+        fs_repo,
+        check_permissions=False,
+    )
+    assert meta["files_scanned"] > 0
+
+
+# =============================================================================
+# Report builders
+# =============================================================================
+
+def test_build_scan_report(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+    report = build_scan_report(result)
+
+    assert "summary" in report
+    assert "files" in report
+    assert "directories" in report
+
+
+def test_build_compact_scan_report(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+    report = build_compact_scan_report(result)
+
+    assert "total_files" in report
+    assert "total_size_bytes" in report
+
+
+# =============================================================================
+# Convenience wrappers
+# =============================================================================
+
+def test_scan_repository_quick(fs_repo: Path):
+    report = scan_repository_quick(fs_repo)
+    assert "elapsed_seconds" in report
+    assert report["total_files"] > 0
+
+
+def test_scan_repository_detailed(fs_repo: Path):
+    report = scan_repository_detailed(fs_repo)
+    assert "files" in report
+    assert "directories" in report
+    assert "metadata" in report
