@@ -778,6 +778,201 @@ def analyze_git_history(
 
     return report
 
+# =============================================================================
+# File-level impact & churn analysis
+# =============================================================================
+
+@dataclass
+class FileChangeImpact:
+    path: str
+    commits: int = 0
+    insertions: int = 0
+    deletions: int = 0
+
+
+def extract_file_level_changes(
+    repo: GitRepositoryInfo,
+    commit_hash: str,
+) -> List[FileChangeImpact]:
+    """
+    Extract file-level change impact for a given commit.
+    """
+    output = run_git_command(
+        repo,
+        ["show", "--numstat", "--format=", commit_hash],
+    )
+
+    impacts: Dict[str, FileChangeImpact] = {}
+
+    for line in output.splitlines():
+        parsed = parse_numstat_line(line)
+        if not parsed:
+            continue
+
+        ins, dels, path = parsed
+        entry = impacts.setdefault(
+            path,
+            FileChangeImpact(path=path),
+        )
+        entry.commits += 1
+        entry.insertions += ins
+        entry.deletions += dels
+
+    return list(impacts.values())
+
+
+def aggregate_file_impact_across_commits(
+    repo: GitRepositoryInfo,
+    commits: Iterable[CommitRecord],
+) -> Dict[str, FileChangeImpact]:
+    """
+    Aggregate file-level impact across multiple commits.
+    """
+    aggregated: Dict[str, FileChangeImpact] = {}
+
+    for commit in commits:
+        try:
+            impacts = extract_file_level_changes(
+                repo,
+                commit.commit_hash,
+            )
+        except GitCommandError:
+            continue
+
+        for impact in impacts:
+            entry = aggregated.setdefault(
+                impact.path,
+                FileChangeImpact(path=impact.path),
+            )
+            entry.commits += impact.commits
+            entry.insertions += impact.insertions
+            entry.deletions += impact.deletions
+
+    return aggregated
+
+
+def compute_churn_metrics(
+    file_impacts: Dict[str, FileChangeImpact],
+) -> Dict[str, Any]:
+    """
+    Compute churn-related metrics across files.
+    """
+    if not file_impacts:
+        return {
+            "files": 0,
+            "high_churn_files": 0,
+            "average_churn": 0.0,
+        }
+
+    churn_values = [
+        impact.insertions + impact.deletions
+        for impact in file_impacts.values()
+    ]
+
+    average_churn = sum(churn_values) / len(churn_values)
+    high_churn = sum(1 for v in churn_values if v > average_churn * 2)
+
+    return {
+        "files": len(file_impacts),
+        "high_churn_files": high_churn,
+        "average_churn": round(average_churn, 2),
+    }
+
+
+# =============================================================================
+# Author time distribution
+# =============================================================================
+
+def analyze_author_time_distribution(
+    commits: Iterable[CommitRecord],
+) -> Dict[str, Dict[str, int]]:
+    """
+    Analyze commit distribution by author over time buckets.
+    """
+    distribution: Dict[str, Dict[str, int]] = {}
+
+    for commit in commits:
+        author = commit.author.email
+        bucket = commit.authored_date.strftime("%Y-%m")
+
+        author_entry = distribution.setdefault(author, {})
+        author_entry[bucket] = author_entry.get(bucket, 0) + 1
+
+    return distribution
+
+
+# =============================================================================
+# Merge & branch heuristics
+# =============================================================================
+
+def detect_merge_commits(
+    commits: Iterable[CommitRecord],
+) -> Dict[str, Any]:
+    """
+    Detect merge commits using commit message heuristics.
+    """
+    merges = [
+        c for c in commits
+        if c.message.lower().startswith("merge")
+    ]
+
+    return {
+        "merge_commits": len(merges),
+        "merge_ratio": round(
+            len(merges) / len(list(commits)), 3
+        ) if commits else 0.0,
+    }
+
+
+# =============================================================================
+# Extended history report
+# =============================================================================
+
+def build_extended_git_history_report(
+    repo: GitRepositoryInfo,
+    *,
+    max_commits: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Build an extended git history report including churn and file impact.
+    """
+    commits = get_commit_log(repo, max_commits=max_commits)
+    commits = normalize_authors(commits)
+    commits = attach_commit_stats(repo, commits)
+
+    frequency = compute_commit_frequency(commits)
+    inactivity = detect_inactivity(commits)
+    contributions = compute_author_contributions(commits)
+    bus_factor = compute_bus_factor(contributions)
+    message_quality = analyze_commit_messages(commits)
+
+    file_impacts = aggregate_file_impact_across_commits(
+        repo,
+        commits,
+    )
+    churn = compute_churn_metrics(file_impacts)
+    author_time = analyze_author_time_distribution(commits)
+    merges = detect_merge_commits(commits)
+
+    score = compute_history_score(
+        frequency,
+        inactivity,
+        bus_factor,
+        message_quality,
+    )
+
+    return {
+        "summary": frequency,
+        "inactivity": inactivity,
+        "bus_factor": bus_factor,
+        "commit_message_quality": message_quality,
+        "churn": churn,
+        "merges": merges,
+        "authors": contributions,
+        "author_time_distribution": author_time,
+        "score": score,
+    }
+
 
 # =============================================================================
 # End of module
