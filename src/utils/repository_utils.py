@@ -673,3 +673,307 @@ def build_repository_summary(
     )
 
     return summary
+
+# =============================================================================
+# Ignore pattern handling
+# =============================================================================
+
+class IgnoreRules:
+    """
+    Simple ignore-rule processor supporting glob-like suffix and prefix rules.
+
+    This is intentionally conservative and filesystem-agnostic. It does not
+    attempt to fully replicate .gitignore semantics but provides predictable,
+    fast filtering suitable for large repository scans.
+    """
+
+    def __init__(self) -> None:
+        self.prefix_rules: Set[str] = set()
+        self.suffix_rules: Set[str] = set()
+        self.contains_rules: Set[str] = set()
+
+    def add_rule(self, rule: str) -> None:
+        rule = rule.strip()
+        if not rule or rule.startswith("#"):
+            return
+
+        if rule.startswith("*") and len(rule) > 1:
+            self.suffix_rules.add(rule[1:])
+        elif rule.endswith("*") and len(rule) > 1:
+            self.prefix_rules.add(rule[:-1])
+        else:
+            self.contains_rules.add(rule)
+
+    def load_from_lines(self, lines: Iterable[str]) -> None:
+        for line in lines:
+            self.add_rule(line)
+
+    def load_from_file(self, path: Path) -> None:
+        try:
+            content = safe_read_text(path)
+            self.load_from_lines(content.splitlines())
+        except FileReadError:
+            logger.warning("Failed to load ignore rules from %s", path)
+
+    def should_ignore(self, path: Path) -> bool:
+        value = str(path)
+
+        for prefix in self.prefix_rules:
+            if value.startswith(prefix):
+                return True
+
+        for suffix in self.suffix_rules:
+            if value.endswith(suffix):
+                return True
+
+        for part in self.contains_rules:
+            if part in value:
+                return True
+
+        return False
+
+
+def load_standard_ignore_rules(root: Path) -> IgnoreRules:
+    """
+    Load ignore rules from common ignore files if present.
+    """
+    rules = IgnoreRules()
+
+    for name in [".gitignore", ".ignore", ".repoignore"]:
+        path = root / name
+        if path.exists():
+            rules.load_from_file(path)
+
+    return rules
+
+
+# =============================================================================
+# Retry & guard helpers
+# =============================================================================
+
+def retry(
+    func,
+    *,
+    attempts: int = 3,
+    delay_seconds: float = 0.2,
+    exceptions: Tuple[type, ...] = (Exception,),
+):
+    """
+    Execute a callable with retry semantics.
+
+    Args:
+        func: Callable to execute
+        attempts: Number of attempts
+        delay_seconds: Delay between attempts
+        exceptions: Exception types to catch
+    """
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except exceptions as exc:
+            last_exc = exc
+            logger.warning(
+                "Retry attempt %d/%d failed: %s",
+                attempt,
+                attempts,
+                exc,
+            )
+            if attempt < attempts:
+                time.sleep(delay_seconds)
+
+    if last_exc:
+        raise last_exc
+    return None
+
+
+def guard(condition: bool, message: str) -> None:
+    """
+    Guard helper to enforce runtime conditions.
+    """
+    if not condition:
+        raise RepositoryUtilsError(message)
+
+
+# =============================================================================
+# Performance timers
+# =============================================================================
+
+class Timer:
+    """
+    Context manager for timing execution blocks.
+    """
+
+    def __init__(self, label: str = "") -> None:
+        self.label = label
+        self.start: Optional[float] = None
+        self.end: Optional[float] = None
+
+    def __enter__(self) -> "Timer":
+        self.start = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.end = time.time()
+        elapsed = self.elapsed
+        if self.label:
+            logger.info("Timer [%s]: %.4fs", self.label, elapsed)
+
+    @property
+    def elapsed(self) -> float:
+        if self.start is None:
+            return 0.0
+        end = self.end if self.end is not None else time.time()
+        return end - self.start
+
+
+# =============================================================================
+# Simple in-memory caching
+# =============================================================================
+
+class SimpleCache:
+    """
+    Simple in-memory cache with optional TTL semantics.
+    """
+
+    def __init__(self) -> None:
+        self._data: Dict[Any, Tuple[Any, Optional[float]]] = {}
+
+    def set(
+        self,
+        key: Any,
+        value: Any,
+        *,
+        ttl_seconds: Optional[float] = None,
+    ) -> None:
+        expires_at = None
+        if ttl_seconds is not None:
+            expires_at = time.time() + ttl_seconds
+        self._data[key] = (value, expires_at)
+
+    def get(self, key: Any) -> Optional[Any]:
+        item = self._data.get(key)
+        if not item:
+            return None
+
+        value, expires_at = item
+        if expires_at is not None and time.time() > expires_at:
+            del self._data[key]
+            return None
+
+        return value
+
+    def clear(self) -> None:
+        self._data.clear()
+
+    def size(self) -> int:
+        return len(self._data)
+
+
+# =============================================================================
+# Validation utilities
+# =============================================================================
+
+def validate_non_empty_string(value: Any, name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise RepositoryUtilsError(f"{name} must be a non-empty string")
+
+
+def validate_positive_int(value: Any, name: str) -> None:
+    if not isinstance(value, int) or value <= 0:
+        raise RepositoryUtilsError(f"{name} must be a positive integer")
+
+
+def validate_optional_path(value: Optional[Path], name: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Path):
+        raise RepositoryUtilsError(f"{name} must be a Path or None")
+
+
+# =============================================================================
+# Extended summary builders
+# =============================================================================
+
+def build_extended_repository_summary(
+    root: Path,
+    *,
+    exclude_dirs: Optional[Iterable[str]] = None,
+    include_hashes: bool = False,
+    include_progress: bool = False,
+) -> Dict[str, Any]:
+    """
+    Build an extended repository summary including optional hashes and progress.
+    """
+    validate_optional_path(root, "root")
+
+    ignore_rules = load_standard_ignore_rules(root)
+    progress = ProgressTracker(report_every=2.0) if include_progress else None
+
+    summary: Dict[str, Any] = {}
+    summary["root"] = str(root)
+    summary["size_bytes"] = get_directory_size_bytes(root)
+    summary["languages"] = {}
+    summary["files"] = []
+
+    for item in walk_repository_tree(root, exclude_dirs=exclude_dirs):
+        if not item.is_file():
+            continue
+
+        if ignore_rules.should_ignore(item):
+            continue
+
+        record: Dict[str, Any] = {
+            "path": str(item),
+            "size": get_file_size_bytes(item),
+            "category": classify_file(item),
+            "language": detect_language_from_extension(item),
+        }
+
+        if include_hashes:
+            try:
+                record["hash"] = compute_file_hash(item)
+            except FileReadError:
+                record["hash"] = None
+
+        lang = record["language"]
+        if lang:
+            summary["languages"][lang] = summary["languages"].get(lang, 0) + 1
+
+        summary["files"].append(record)
+
+        if progress:
+            progress.increment()
+
+    if progress:
+        summary["progress"] = progress.snapshot()
+
+    return summary
+
+
+def summarize_repository_quick(
+    root: Path,
+    *,
+    exclude_dirs: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Build a lightweight summary intended for fast checks.
+    """
+    return {
+        "root": str(root),
+        "total_size_bytes": get_directory_size_bytes(root),
+        "language_stats": aggregate_language_stats(
+            root, exclude_dirs=exclude_dirs
+        ),
+        "file_categories": aggregate_file_categories(
+            root, exclude_dirs=exclude_dirs
+        ),
+    }
+
+
+# =============================================================================
+# End of module
+# =============================================================================
+# The module is intentionally verbose and comprehensive, providing a wide
+# range of utility functions for repository analysis and management.
