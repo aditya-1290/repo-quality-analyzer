@@ -283,3 +283,130 @@ def test_scan_repository_detailed(fs_repo: Path):
     assert "files" in report
     assert "directories" in report
     assert "metadata" in report
+
+# =============================================================================
+# Edge cases & robustness tests
+# =============================================================================
+
+def test_scan_empty_directory(tmp_path: Path):
+    empty = tmp_path / "empty_repo"
+    empty.mkdir()
+
+    result = scan_filesystem(empty)
+    assert result.files == []
+    assert result.directories == []
+    assert result.errors == []
+
+
+def test_scan_respects_exclude_dirs(fs_repo: Path):
+    result = scan_filesystem(
+        fs_repo,
+        exclude_dirs=["tests"],
+    )
+
+    # ensure test directory was skipped
+    paths = [f.path for f in result.files]
+    assert not any("tests" in p for p in paths)
+
+
+def test_scan_symlink_handling(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    target = root / "real.txt"
+    target.write_text("hello", encoding="utf-8")
+
+    symlink = root / "link.txt"
+    symlink.symlink_to(target)
+
+    result_no_links = scan_filesystem(
+        root,
+        limits=ScanLimits(follow_symlinks=False),
+    )
+    assert all(not f.is_symlink for f in result_no_links.files)
+
+    result_with_links = scan_filesystem(
+        root,
+        limits=ScanLimits(follow_symlinks=True),
+    )
+    assert any(f.is_symlink for f in result_with_links.files)
+
+
+def test_scan_max_files_enforced(fs_repo: Path):
+    limits = ScanLimits(max_files=2)
+    result = scan_filesystem(fs_repo, limits=limits)
+
+    assert len(result.files) == 2
+
+
+def test_directory_aggregation_consistency(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+    aggregated = aggregate_directory_metadata(
+        result.files,
+        result.directories,
+    )
+
+    total_files = sum(d.total_files for d in aggregated)
+    assert total_files == len(result.files)
+
+
+def test_perform_scan_metadata_values(fs_repo: Path):
+    _, meta = perform_scan(fs_repo)
+
+    assert "elapsed_seconds" in meta
+    assert meta["files_scanned"] >= 0
+    assert meta["directories_scanned"] >= 0
+    assert meta["errors_count"] >= 0
+
+
+def test_build_scan_report_flags(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+
+    report = build_scan_report(
+        result,
+        include_files=False,
+        include_directories=False,
+        include_errors=False,
+    )
+
+    assert "files" not in report
+    assert "directories" not in report
+    assert "errors" not in report
+    assert "summary" in report
+
+
+def test_compact_report_matches_summary(fs_repo: Path):
+    result = scan_filesystem(fs_repo)
+
+    compact = build_compact_scan_report(result)
+    summary = summarize_scan_result(result)
+
+    assert compact["total_files"] == summary["total_files"]
+    assert compact["total_size_bytes"] == summary["total_size_bytes"]
+
+
+def test_scan_repository_quick_is_lightweight(fs_repo: Path):
+    report = scan_repository_quick(fs_repo)
+
+    assert "files" not in report
+    assert "directories" not in report
+    assert report["total_files"] > 0
+
+
+def test_scan_repository_detailed_structure(fs_repo: Path):
+    report = scan_repository_detailed(fs_repo)
+
+    assert isinstance(report["files"], list)
+    assert isinstance(report["directories"], list)
+    assert isinstance(report["metadata"], dict)
+
+
+def test_error_truncation_applied():
+    result = ScanResult(
+        files=[],
+        directories=[],
+        errors=[f"err{i}" for i in range(200)],
+    )
+
+    truncated = truncate_errors(result, max_errors=25)
+    assert len(truncated.errors) == 25
