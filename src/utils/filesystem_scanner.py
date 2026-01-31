@@ -401,3 +401,245 @@ def sort_directories_by_size(
         key=lambda d: d.total_size_bytes,
         reverse=descending,
     )
+
+# =============================================================================
+# Limits enforcement & helpers
+# =============================================================================
+
+def enforce_limits_on_result(
+    result: ScanResult,
+    *,
+    max_files: Optional[int] = None,
+    max_directories: Optional[int] = None,
+) -> ScanResult:
+    """
+    Enforce post-scan limits on a ScanResult.
+
+    This is useful when scans are executed in best-effort mode and limits
+    must be applied after traversal.
+    """
+    if max_files is not None and len(result.files) > max_files:
+        result.files = result.files[:max_files]
+
+    if max_directories is not None and len(result.directories) > max_directories:
+        result.directories = result.directories[:max_directories]
+
+    return result
+
+
+def truncate_errors(
+    result: ScanResult,
+    *,
+    max_errors: int = 50,
+) -> ScanResult:
+    """
+    Truncate the error list to a maximum number of entries.
+    """
+    if len(result.errors) > max_errors:
+        result.errors = result.errors[:max_errors]
+    return result
+
+
+# =============================================================================
+# Timing & instrumentation
+# =============================================================================
+
+class ScanTimer:
+    """
+    Timer utility for filesystem scans.
+    """
+
+    def __init__(self) -> None:
+        self.started_at: Optional[float] = None
+        self.finished_at: Optional[float] = None
+
+    def start(self) -> None:
+        self.started_at = time.time()
+
+    def stop(self) -> None:
+        self.finished_at = time.time()
+
+    @property
+    def elapsed_seconds(self) -> float:
+        if self.started_at is None:
+            return 0.0
+        end = self.finished_at if self.finished_at is not None else time.time()
+        return round(end - self.started_at, 4)
+
+
+# =============================================================================
+# Scan orchestration
+# =============================================================================
+
+def perform_scan(
+    root: Path,
+    *,
+    limits: Optional[ScanLimits] = None,
+    exclude_dirs: Optional[Iterable[str]] = None,
+    check_permissions: bool = True,
+    max_errors: Optional[int] = None,
+) -> Tuple[ScanResult, Dict[str, Any]]:
+    """
+    Perform a filesystem scan with orchestration, timing, and summaries.
+
+    Returns:
+        (ScanResult, metadata)
+    """
+    timer = ScanTimer()
+    timer.start()
+
+    if check_permissions:
+        result = scan_with_permissions(
+            root,
+            limits=limits,
+            exclude_dirs=exclude_dirs,
+        )
+    else:
+        result = scan_without_permissions(
+            root,
+            limits=limits,
+            exclude_dirs=exclude_dirs,
+        )
+
+    # Aggregate directory metadata
+    try:
+        aggregated_dirs = aggregate_directory_metadata(
+            result.files,
+            result.directories,
+        )
+        result.directories = aggregated_dirs
+    except Exception as exc:  # noqa
+        logger.warning("Failed to aggregate directories: %s", exc)
+        result.errors.append(str(exc))
+
+    if limits:
+        result = enforce_limits_on_result(
+            result,
+            max_files=limits.max_files,
+        )
+
+    if max_errors is not None:
+        result = truncate_errors(result, max_errors=max_errors)
+
+    timer.stop()
+
+    metadata = {
+        "elapsed_seconds": timer.elapsed_seconds,
+        "files_scanned": len(result.files),
+        "directories_scanned": len(result.directories),
+        "errors_count": len(result.errors),
+    }
+
+    return result, metadata
+
+
+# =============================================================================
+# Report builders
+# =============================================================================
+
+def build_scan_report(
+    result: ScanResult,
+    *,
+    include_files: bool = True,
+    include_directories: bool = True,
+    include_errors: bool = True,
+) -> Dict[str, Any]:
+    """
+    Build a structured report from a ScanResult.
+    """
+    report: Dict[str, Any] = {}
+
+    report["summary"] = summarize_scan_result(result)
+
+    if include_files:
+        report["files"] = [
+            {
+                "path": f.path,
+                "size_bytes": f.size_bytes,
+                "is_symlink": f.is_symlink,
+                "is_executable": f.is_executable,
+                "last_modified": f.last_modified.isoformat(),
+            }
+            for f in result.files
+        ]
+
+    if include_directories:
+        report["directories"] = [
+            {
+                "path": d.path,
+                "depth": d.depth,
+                "total_files": d.total_files,
+                "total_size_bytes": d.total_size_bytes,
+            }
+            for d in result.directories
+        ]
+
+    if include_errors:
+        report["errors"] = list(result.errors)
+
+    return report
+
+
+def build_compact_scan_report(
+    result: ScanResult,
+) -> Dict[str, Any]:
+    """
+    Build a compact report intended for CLI or logging output.
+    """
+    summary = summarize_scan_result(result)
+    return {
+        "total_files": summary["total_files"],
+        "total_directories": summary["total_directories"],
+        "total_size_bytes": summary["total_size_bytes"],
+        "errors": summary["errors_count"],
+    }
+
+
+# =============================================================================
+# Convenience wrappers
+# =============================================================================
+
+def scan_repository_quick(
+    root: Path,
+    *,
+    exclude_dirs: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Perform a quick filesystem scan and return a compact report.
+    """
+    result, meta = perform_scan(
+        root,
+        exclude_dirs=exclude_dirs,
+        check_permissions=False,
+    )
+
+    report = build_compact_scan_report(result)
+    report["elapsed_seconds"] = meta["elapsed_seconds"]
+    return report
+
+
+def scan_repository_detailed(
+    root: Path,
+    *,
+    limits: Optional[ScanLimits] = None,
+    exclude_dirs: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Perform a detailed filesystem scan and return a full report.
+    """
+    result, meta = perform_scan(
+        root,
+        limits=limits,
+        exclude_dirs=exclude_dirs,
+        check_permissions=True,
+        max_errors=100,
+    )
+
+    report = build_scan_report(result)
+    report["metadata"] = meta
+    return report
+
+
+# =============================================================================
+# End of module
+# =============================================================================
