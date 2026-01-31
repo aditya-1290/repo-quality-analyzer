@@ -504,3 +504,281 @@ def analyze_commit_activity(
         "frequency": frequency,
         "changes": changes,
     }
+
+# =============================================================================
+# Author dominance & bus factor heuristics
+# =============================================================================
+
+def compute_author_contributions(
+    commits: Iterable[CommitRecord],
+) -> Dict[str, Dict[str, int]]:
+    """
+    Compute contribution counts per author.
+
+    Returns:
+        {
+            "<author_email>": {
+                "commits": int,
+                "insertions": int,
+                "deletions": int,
+            }
+        }
+    """
+    contributions: Dict[str, Dict[str, int]] = {}
+
+    for commit in commits:
+        email = commit.author.email
+        entry = contributions.setdefault(
+            email,
+            {"commits": 0, "insertions": 0, "deletions": 0},
+        )
+
+        entry["commits"] += 1
+        if commit.stats:
+            entry["insertions"] += commit.stats.insertions
+            entry["deletions"] += commit.stats.deletions
+
+    return contributions
+
+
+def compute_bus_factor(
+    contributions: Dict[str, Dict[str, int]],
+    *,
+    threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """
+    Estimate a simple bus factor based on commit dominance.
+
+    threshold:
+        Fraction of commits attributed to top contributors required
+        to reach the bus factor.
+    """
+    total_commits = sum(v["commits"] for v in contributions.values())
+    if total_commits == 0:
+        return {
+            "bus_factor": 0,
+            "dominant_authors": [],
+        }
+
+    sorted_authors = sorted(
+        contributions.items(),
+        key=lambda item: item[1]["commits"],
+        reverse=True,
+    )
+
+    cumulative = 0
+    dominant: List[str] = []
+
+    for email, stats in sorted_authors:
+        cumulative += stats["commits"]
+        dominant.append(email)
+        if cumulative / total_commits >= threshold:
+            break
+
+    return {
+        "bus_factor": len(dominant),
+        "dominant_authors": dominant,
+    }
+
+
+# =============================================================================
+# Inactivity & maintenance signals
+# =============================================================================
+
+def detect_inactivity(
+    commits: Iterable[CommitRecord],
+    *,
+    inactive_days_threshold: int = 90,
+) -> Dict[str, Any]:
+    """
+    Detect repository inactivity based on last commit date.
+    """
+    commits_list = list(commits)
+    if not commits_list:
+        return {
+            "inactive": True,
+            "days_since_last_commit": None,
+        }
+
+    last_commit = max(commits_list, key=lambda c: c.authored_date)
+    days_since = (datetime.utcnow() - last_commit.authored_date).days
+
+    return {
+        "inactive": days_since >= inactive_days_threshold,
+        "days_since_last_commit": days_since,
+    }
+
+
+# =============================================================================
+# Commit message quality checks
+# =============================================================================
+
+MIN_COMMIT_MESSAGE_LENGTH = 10
+
+
+def is_meaningful_commit_message(message: str) -> bool:
+    """
+    Determine whether a commit message is likely meaningful.
+    """
+    if not message:
+        return False
+
+    message = message.strip()
+    if len(message) < MIN_COMMIT_MESSAGE_LENGTH:
+        return False
+
+    # avoid obvious low-quality messages
+    lowered = message.lower()
+    low_quality_markers = [
+        "fix",
+        "update",
+        "changes",
+        "stuff",
+        "wip",
+    ]
+
+    return not any(lowered == marker for marker in low_quality_markers)
+
+
+def analyze_commit_messages(
+    commits: Iterable[CommitRecord],
+) -> Dict[str, Any]:
+    """
+    Analyze commit message quality.
+    """
+    total = 0
+    meaningful = 0
+
+    for commit in commits:
+        total += 1
+        if is_meaningful_commit_message(commit.message):
+            meaningful += 1
+
+    ratio = round(meaningful / total, 3) if total else 0.0
+
+    return {
+        "total_messages": total,
+        "meaningful_messages": meaningful,
+        "meaningful_ratio": ratio,
+    }
+
+
+# =============================================================================
+# Scoring heuristics
+# =============================================================================
+
+def compute_history_score(
+    frequency: Dict[str, Any],
+    inactivity: Dict[str, Any],
+    bus_factor: Dict[str, Any],
+    message_quality: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Compute a heuristic score representing repository history health.
+    """
+    score = 100.0
+
+    if inactivity.get("inactive"):
+        score -= 30.0
+
+    commits_per_day = frequency.get("commits_per_day", 0.0)
+    if commits_per_day < 0.01:
+        score -= 20.0
+    elif commits_per_day < 0.05:
+        score -= 10.0
+
+    if bus_factor.get("bus_factor", 0) <= 1:
+        score -= 15.0
+
+    meaningful_ratio = message_quality.get("meaningful_ratio", 0.0)
+    if meaningful_ratio < 0.3:
+        score -= 10.0
+
+    return {
+        "score": max(round(score, 2), 0.0),
+        "components": {
+            "frequency": frequency,
+            "inactivity": inactivity,
+            "bus_factor": bus_factor,
+            "message_quality": message_quality,
+        },
+    }
+
+
+# =============================================================================
+# Report builders
+# =============================================================================
+
+def build_git_history_report(
+    repo: GitRepositoryInfo,
+    *,
+    max_commits: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Build a comprehensive git history report.
+    """
+    commits = get_commit_log(repo, max_commits=max_commits)
+    commits = normalize_authors(commits)
+    commits = attach_commit_stats(repo, commits)
+
+    frequency = compute_commit_frequency(commits)
+    inactivity = detect_inactivity(commits)
+    contributions = compute_author_contributions(commits)
+    bus_factor = compute_bus_factor(contributions)
+    message_quality = analyze_commit_messages(commits)
+    history_score = compute_history_score(
+        frequency,
+        inactivity,
+        bus_factor,
+        message_quality,
+    )
+
+    return {
+        "summary": {
+            "total_commits": frequency["total_commits"],
+            "days_active": frequency["days_active"],
+            "commits_per_day": frequency["commits_per_day"],
+        },
+        "authors": contributions,
+        "bus_factor": bus_factor,
+        "inactivity": inactivity,
+        "commit_message_quality": message_quality,
+        "score": history_score,
+    }
+
+
+# =============================================================================
+# Orchestration entry point
+# =============================================================================
+
+def analyze_git_history(
+    path: Path,
+    *,
+    max_commits: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    High-level entry point for git history analysis.
+
+    This function performs:
+    - repository discovery
+    - validation
+    - history analysis
+    - report construction
+    """
+    if not is_git_available():
+        raise GitHistoryError("git is not available on this system")
+
+    repo = find_git_repository_root(path)
+    validate_git_repository(repo)
+
+    report = build_git_history_report(
+        repo,
+        max_commits=max_commits,
+    )
+
+    return report
+
+
+# =============================================================================
+# End of module
+# =============================================================================
