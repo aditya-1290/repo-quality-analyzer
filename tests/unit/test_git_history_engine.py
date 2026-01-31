@@ -329,3 +329,130 @@ def test_build_extended_git_history_report(git_repo: Path):
     assert "churn" in report
     assert "bus_factor" in report
     assert "author_time_distribution" in report
+
+# =============================================================================
+# Edge cases & robustness tests
+# =============================================================================
+
+def test_parse_git_log_line_invalid():
+    # missing fields
+    assert parse_git_log_line("invalid|line") is None
+
+    # invalid timestamp
+    bad = "abc|Name|email@test.com|notatime|msg"
+    assert parse_git_log_line(bad) is None
+
+
+def test_get_commit_log_with_limit(git_repo: Path):
+    repo_info = find_git_repository_root(git_repo)
+    commits = get_commit_log(repo_info, max_commits=1)
+
+    assert len(commits) == 1
+
+
+def test_normalize_authors_idempotent(git_repo: Path):
+    repo_info = find_git_repository_root(git_repo)
+    commits = get_commit_log(repo_info)
+
+    first = normalize_authors(commits)
+    second = normalize_authors(first)
+
+    assert first[0].author.email == second[0].author.email
+
+
+def test_group_commits_by_author_consistency(git_repo: Path):
+    repo_info = find_git_repository_root(git_repo)
+    commits = normalize_authors(get_commit_log(repo_info))
+
+    grouped = group_commits_by_author(commits)
+    total = sum(len(v) for v in grouped.values())
+
+    assert total == len(commits)
+
+
+def test_commit_frequency_empty():
+    freq = compute_commit_frequency([])
+    assert freq["total_commits"] == 0
+    assert freq["commits_per_day"] == 0.0
+
+
+def test_bus_factor_single_author():
+    contributions = {
+        "a@test.com": {"commits": 10, "insertions": 0, "deletions": 0}
+    }
+
+    bus = compute_bus_factor(contributions)
+    assert bus["bus_factor"] == 1
+
+
+def test_detect_inactivity_no_commits():
+    inactivity = detect_inactivity([])
+    assert inactivity["inactive"] is True
+    assert inactivity["days_since_last_commit"] is None
+
+
+def test_commit_message_quality_edge_cases():
+    commits = [
+        type(
+            "Dummy",
+            (),
+            {"message": "fix", "authored_date": datetime.utcnow()},
+        )(),
+        type(
+            "Dummy",
+            (),
+            {"message": "add proper feature implementation",
+             "authored_date": datetime.utcnow()},
+        )(),
+    ]
+
+    quality = analyze_commit_messages(commits)
+    assert quality["total_messages"] == 2
+    assert quality["meaningful_messages"] == 1
+
+
+def test_compute_history_score_penalties():
+    score = compute_history_score(
+        frequency={"commits_per_day": 0.0},
+        inactivity={"inactive": True},
+        bus_factor={"bus_factor": 1},
+        message_quality={"meaningful_ratio": 0.1},
+    )
+
+    assert score["score"] < 100.0
+
+
+def test_churn_metrics_empty():
+    churn = compute_churn_metrics({})
+    assert churn["files"] == 0
+    assert churn["average_churn"] == 0.0
+
+
+def test_author_time_distribution_empty():
+    dist = analyze_author_time_distribution([])
+    assert dist == {}
+
+
+def test_merge_detection_no_merges(git_repo: Path):
+    repo_info = find_git_repository_root(git_repo)
+    commits = get_commit_log(repo_info)
+
+    merges = detect_merge_commits(commits)
+    assert merges["merge_commits"] >= 0
+
+
+def test_extended_history_report_structure(git_repo: Path):
+    repo_info = find_git_repository_root(git_repo)
+    report = build_extended_git_history_report(repo_info)
+
+    required_keys = {
+        "summary",
+        "inactivity",
+        "bus_factor",
+        "commit_message_quality",
+        "churn",
+        "authors",
+        "score",
+    }
+
+    assert required_keys.issubset(set(report.keys()))
