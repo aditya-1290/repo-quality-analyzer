@@ -266,3 +266,241 @@ def group_commits_by_author(
         groups.setdefault(key, []).append(commit)
 
     return groups
+
+# =============================================================================
+# Commit statistics extraction
+# =============================================================================
+
+def parse_numstat_line(line: str) -> Optional[Tuple[int, int, str]]:
+    """
+    Parse a single line of git numstat output.
+
+    Expected format:
+        <insertions>\t<deletions>\t<path>
+
+    Binary files may report '-' instead of numbers.
+    """
+    parts = line.split("\t")
+    if len(parts) != 3:
+        return None
+
+    ins_raw, del_raw, path = parts
+
+    try:
+        insertions = int(ins_raw)
+    except ValueError:
+        insertions = 0
+
+    try:
+        deletions = int(del_raw)
+    except ValueError:
+        deletions = 0
+
+    return insertions, deletions, path
+
+
+def get_commit_stats(
+    repo: GitRepositoryInfo,
+    commit_hash: str,
+) -> CommitStats:
+    """
+    Retrieve file change statistics for a specific commit.
+    """
+    output = run_git_command(
+        repo,
+        ["show", "--numstat", "--format=", commit_hash],
+    )
+
+    files_changed = 0
+    insertions = 0
+    deletions = 0
+
+    for line in output.splitlines():
+        parsed = parse_numstat_line(line)
+        if not parsed:
+            continue
+
+        ins, dels, _path = parsed
+        files_changed += 1
+        insertions += ins
+        deletions += dels
+
+    return CommitStats(
+        files_changed=files_changed,
+        insertions=insertions,
+        deletions=deletions,
+    )
+
+
+def attach_commit_stats(
+    repo: GitRepositoryInfo,
+    commits: Iterable[CommitRecord],
+) -> List[CommitRecord]:
+    """
+    Attach CommitStats to each CommitRecord.
+    """
+    enriched: List[CommitRecord] = []
+
+    for commit in commits:
+        try:
+            stats = get_commit_stats(repo, commit.commit_hash)
+        except GitCommandError as exc:
+            logger.warning(
+                "Failed to retrieve stats for commit %s: %s",
+                commit.commit_hash,
+                exc,
+            )
+            stats = None
+
+        enriched.append(
+            CommitRecord(
+                commit_hash=commit.commit_hash,
+                author=commit.author,
+                authored_date=commit.authored_date,
+                message=commit.message,
+                stats=stats,
+            )
+        )
+
+    return enriched
+
+
+# =============================================================================
+# Timeline bucketing & frequency analysis
+# =============================================================================
+
+def bucket_commits_by_day(
+    commits: Iterable[CommitRecord],
+) -> Dict[str, List[CommitRecord]]:
+    """
+    Bucket commits by day (YYYY-MM-DD).
+    """
+    buckets: Dict[str, List[CommitRecord]] = {}
+
+    for commit in commits:
+        day = commit.authored_date.strftime("%Y-%m-%d")
+        buckets.setdefault(day, []).append(commit)
+
+    return buckets
+
+
+def bucket_commits_by_month(
+    commits: Iterable[CommitRecord],
+) -> Dict[str, List[CommitRecord]]:
+    """
+    Bucket commits by month (YYYY-MM).
+    """
+    buckets: Dict[str, List[CommitRecord]] = {}
+
+    for commit in commits:
+        month = commit.authored_date.strftime("%Y-%m")
+        buckets.setdefault(month, []).append(commit)
+
+    return buckets
+
+
+def compute_commit_frequency(
+    commits: Iterable[CommitRecord],
+) -> Dict[str, Any]:
+    """
+    Compute basic commit frequency metrics.
+    """
+    commits_list = list(commits)
+    if not commits_list:
+        return {
+            "total_commits": 0,
+            "days_active": 0,
+            "commits_per_day": 0.0,
+        }
+
+    commits_sorted = sorted(
+        commits_list,
+        key=lambda c: c.authored_date,
+    )
+
+    first = commits_sorted[0].authored_date
+    last = commits_sorted[-1].authored_date
+    days_active = max((last - first).days + 1, 1)
+
+    total_commits = len(commits_sorted)
+    commits_per_day = round(total_commits / days_active, 3)
+
+    return {
+        "total_commits": total_commits,
+        "days_active": days_active,
+        "commits_per_day": commits_per_day,
+    }
+
+
+# =============================================================================
+# File change aggregation
+# =============================================================================
+
+def aggregate_file_changes(
+    commits: Iterable[CommitRecord],
+) -> Dict[str, Dict[str, int]]:
+    """
+    Aggregate file change statistics across commits.
+
+    Returns:
+        {
+            "summary": {...},
+            "files": {...}
+        }
+    """
+    summary = {
+        "files_changed": 0,
+        "total_insertions": 0,
+        "total_deletions": 0,
+    }
+
+    per_file: Dict[str, Dict[str, int]] = {}
+
+    for commit in commits:
+        if not commit.stats:
+            continue
+
+        summary["files_changed"] += commit.stats.files_changed
+        summary["total_insertions"] += commit.stats.insertions
+        summary["total_deletions"] += commit.stats.deletions
+
+    return {
+        "summary": summary,
+        "files": per_file,
+    }
+
+
+# =============================================================================
+# High-level analysis helpers
+# =============================================================================
+
+def analyze_commit_activity(
+    repo: GitRepositoryInfo,
+    *,
+    max_commits: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Perform a high-level analysis of commit activity.
+    """
+    commits = get_commit_log(repo, max_commits=max_commits)
+    commits = normalize_authors(commits)
+    commits = attach_commit_stats(repo, commits)
+
+    by_author = group_commits_by_author(commits)
+    by_day = bucket_commits_by_day(commits)
+    by_month = bucket_commits_by_month(commits)
+    frequency = compute_commit_frequency(commits)
+    changes = aggregate_file_changes(commits)
+
+    return {
+        "authors": {
+            author: len(records)
+            for author, records in by_author.items()
+        },
+        "timeline": {
+            "by_day": {k: len(v) for k, v in by_day.items()},
+            "by_month": {k: len(v) for k, v in by_month.items()},
+        },
+        "frequency": frequency,
+        "changes": changes,
+    }
