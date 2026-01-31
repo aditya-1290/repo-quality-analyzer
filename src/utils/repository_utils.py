@@ -342,3 +342,334 @@ def write_json_file(
         raise RepositoryUtilsError(
             f"Failed to write JSON file {path}: {exc}"
         ) from exc
+
+# =============================================================================
+# Language detection & file classification
+# =============================================================================
+
+LANGUAGE_BY_EXTENSION: Dict[str, str] = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".h": "c_header",
+    ".cs": "csharp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".swift": "swift",
+    ".kt": "kotlin",
+    ".scala": "scala",
+    ".sh": "shell",
+    ".ps1": "powershell",
+    ".sql": "sql",
+    ".html": "html",
+    ".css": "css",
+    ".md": "markdown",
+    ".json": "json",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".xml": "xml",
+}
+
+TEST_FILE_MARKERS: Tuple[str, ...] = (
+    "test_",
+    "_test",
+    "/tests/",
+    "/__tests__/",
+    ".spec.",
+    ".test.",
+)
+
+CONFIG_FILE_NAMES: Set[str] = {
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
+    "package.json",
+    "pom.xml",
+    "build.gradle",
+    "gradle.properties",
+    ".editorconfig",
+    ".gitignore",
+    ".gitattributes",
+}
+
+DOC_EXTENSIONS: Set[str] = {
+    ".md",
+    ".rst",
+    ".txt",
+    ".adoc",
+}
+
+
+def detect_language_from_extension(path: Path) -> Optional[str]:
+    """
+    Detect programming language based on file extension.
+
+    Returns:
+        Language name or None if unknown.
+    """
+    return LANGUAGE_BY_EXTENSION.get(path.suffix.lower())
+
+
+def is_test_file(path: Path) -> bool:
+    """
+    Determine whether a file is likely a test file based on path heuristics.
+    """
+    lower = str(path).lower()
+    return any(marker in lower for marker in TEST_FILE_MARKERS)
+
+
+def is_config_file(path: Path) -> bool:
+    """
+    Determine whether a file is a configuration file.
+    """
+    return path.name in CONFIG_FILE_NAMES
+
+
+def is_documentation_file(path: Path) -> bool:
+    """
+    Determine whether a file is a documentation file.
+    """
+    return path.suffix.lower() in DOC_EXTENSIONS
+
+
+def classify_file(path: Path) -> str:
+    """
+    Classify a file into a high-level category.
+
+    Categories:
+        - source
+        - test
+        - config
+        - docs
+        - binary
+        - unknown
+    """
+    if not path.is_file():
+        return "unknown"
+
+    if is_binary_file(path):
+        return "binary"
+
+    if is_test_file(path):
+        return "test"
+
+    if is_config_file(path):
+        return "config"
+
+    if is_documentation_file(path):
+        return "docs"
+
+    if detect_language_from_extension(path):
+        return "source"
+
+    return "unknown"
+
+
+# =============================================================================
+# Repository statistics & aggregation
+# =============================================================================
+
+def aggregate_language_stats(
+    root: Path,
+    *,
+    exclude_dirs: Optional[Iterable[str]] = None,
+) -> Dict[str, int]:
+    """
+    Aggregate counts of files per detected programming language.
+    """
+    stats: Dict[str, int] = {}
+
+    for item in walk_repository_tree(root, exclude_dirs=exclude_dirs):
+        if not item.is_file():
+            continue
+
+        language = detect_language_from_extension(item)
+        if not language:
+            continue
+
+        stats[language] = stats.get(language, 0) + 1
+
+    return dict(sorted(stats.items()))
+
+
+def aggregate_file_categories(
+    root: Path,
+    *,
+    exclude_dirs: Optional[Iterable[str]] = None,
+) -> Dict[str, int]:
+    """
+    Count files by classification category.
+    """
+    categories: Dict[str, int] = {}
+
+    for item in walk_repository_tree(root, exclude_dirs=exclude_dirs):
+        if not item.is_file():
+            continue
+
+        category = classify_file(item)
+        categories[category] = categories.get(category, 0) + 1
+
+    return dict(sorted(categories.items()))
+
+
+def collect_directory_depth_stats(root: Path) -> Dict[int, int]:
+    """
+    Collect statistics on directory depth distribution.
+    """
+    depth_stats: Dict[int, int] = {}
+
+    for item in walk_repository_tree(root):
+        try:
+            depth = len(item.relative_to(root).parts)
+        except ValueError:
+            continue
+
+        depth_stats[depth] = depth_stats.get(depth, 0) + 1
+
+    return dict(sorted(depth_stats.items()))
+
+
+# =============================================================================
+# Line counting utilities
+# =============================================================================
+
+def count_lines_in_text(text: str) -> Tuple[int, int, int]:
+    """
+    Count total, blank, and non-blank lines in text.
+
+    Returns:
+        (total_lines, blank_lines, non_blank_lines)
+    """
+    total = 0
+    blank = 0
+
+    for line in text.splitlines():
+        total += 1
+        if not line.strip():
+            blank += 1
+
+    return total, blank, total - blank
+
+
+def count_lines_in_file(
+    path: Path,
+    *,
+    max_bytes: Optional[int] = None,
+) -> Tuple[int, int, int]:
+    """
+    Count lines in a single file safely.
+    """
+    try:
+        content = safe_read_text(path, max_bytes=max_bytes)
+        return count_lines_in_text(content)
+    except FileReadError:
+        return 0, 0, 0
+
+
+def count_repository_lines(
+    root: Path,
+    *,
+    exclude_dirs: Optional[Iterable[str]] = None,
+    max_bytes_per_file: Optional[int] = None,
+) -> Dict[str, int]:
+    """
+    Count total, blank, and non-blank lines across a repository.
+    """
+    totals = {
+        "total_lines": 0,
+        "blank_lines": 0,
+        "non_blank_lines": 0,
+        "files_counted": 0,
+    }
+
+    for item in walk_repository_tree(root, exclude_dirs=exclude_dirs):
+        if not item.is_file():
+            continue
+
+        total, blank, non_blank = count_lines_in_file(
+            item,
+            max_bytes=max_bytes_per_file,
+        )
+
+        totals["total_lines"] += total
+        totals["blank_lines"] += blank
+        totals["non_blank_lines"] += non_blank
+        totals["files_counted"] += 1
+
+    return totals
+
+
+# =============================================================================
+# Progress & timing helpers
+# =============================================================================
+
+class ProgressTracker:
+    """
+    Lightweight progress tracker for long-running repository operations.
+    """
+
+    def __init__(self, *, report_every: float = 1.0) -> None:
+        self.start_time = time.time()
+        self.last_report = self.start_time
+        self.report_every = report_every
+        self.items_processed = 0
+
+    def increment(self, count: int = 1) -> None:
+        """
+        Increment processed item count and emit progress if needed.
+        """
+        self.items_processed += count
+        now = time.time()
+
+        if now - self.last_report >= self.report_every:
+            self.last_report = now
+            logger.info(
+                "Processed %d items (elapsed %.2fs)",
+                self.items_processed,
+                now - self.start_time,
+            )
+
+    def snapshot(self) -> Dict[str, Any]:
+        """
+        Return a snapshot of current progress.
+        """
+        now = time.time()
+        return {
+            "items_processed": self.items_processed,
+            "elapsed_seconds": round(now - self.start_time, 2),
+        }
+
+
+# =============================================================================
+# Summary builders
+# =============================================================================
+
+def build_repository_summary(
+    root: Path,
+    *,
+    exclude_dirs: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Build a high-level summary of repository characteristics.
+    """
+    summary: Dict[str, Any] = {}
+
+    summary["total_size_bytes"] = get_directory_size_bytes(root)
+    summary["languages"] = aggregate_language_stats(
+        root, exclude_dirs=exclude_dirs
+    )
+    summary["file_categories"] = aggregate_file_categories(
+        root, exclude_dirs=exclude_dirs
+    )
+    summary["directory_depths"] = collect_directory_depth_stats(root)
+    summary["line_counts"] = count_repository_lines(
+        root, exclude_dirs=exclude_dirs
+    )
+
+    return summary
