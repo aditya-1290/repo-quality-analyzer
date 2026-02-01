@@ -492,3 +492,249 @@ def compare_repositories(
 
     return comparison
    
+# =============================================================================
+# Presets
+# =============================================================================
+
+@dataclass
+class MetricsPreset:
+    name: str
+    thresholds: MetricThresholds
+    weights: Dict[str, float]
+    description: str
+
+
+STRICT_PRESET = MetricsPreset(
+    name="strict",
+    thresholds=MetricThresholds(
+        min_commits_per_day=0.05,
+        max_days_inactive=60,
+        min_bus_factor=3,
+        min_meaningful_commit_ratio=0.5,
+        max_average_churn=300.0,
+        max_merge_ratio=0.3,
+    ),
+    weights={"structure": 0.3, "activity": 0.35, "quality": 0.35},
+    description="Strict evaluation for production-grade repositories.",
+)
+
+RELAXED_PRESET = MetricsPreset(
+    name="relaxed",
+    thresholds=MetricThresholds(),
+    weights={"structure": 0.3, "activity": 0.3, "quality": 0.4},
+    description="Relaxed evaluation for early-stage or research repositories.",
+)
+
+RESEARCH_PRESET = MetricsPreset(
+    name="research",
+    thresholds=MetricThresholds(
+        min_commits_per_day=0.005,
+        max_days_inactive=180,
+        min_bus_factor=1,
+        min_meaningful_commit_ratio=0.2,
+        max_average_churn=800.0,
+        max_merge_ratio=0.6,
+    ),
+    weights={"structure": 0.25, "activity": 0.25, "quality": 0.5},
+    description="Research-oriented evaluation prioritizing experimentation.",
+)
+
+
+PRESETS = {
+    STRICT_PRESET.name: STRICT_PRESET,
+    RELAXED_PRESET.name: RELAXED_PRESET,
+    RESEARCH_PRESET.name: RESEARCH_PRESET,
+}
+
+
+# =============================================================================
+# Report builders
+# =============================================================================
+
+def build_metrics_report(
+    metrics: RepositoryMetrics,
+    *,
+    preset: Optional[MetricsPreset] = None,
+) -> Dict[str, Any]:
+    """
+    Build a structured metrics report suitable for JSON export.
+    """
+    preset = preset or RELAXED_PRESET
+
+    composite = compute_composite_score(
+        metrics.structural,
+        metrics.activity,
+        metrics.quality,
+        weights=preset.weights,
+    )
+
+    risks = detect_risk_flags(
+        metrics.activity,
+        metrics.quality,
+        thresholds=preset.thresholds,
+    )
+
+    return {
+        "generated_at": metrics.generated_at.isoformat(),
+        "preset": preset.name,
+        "scores": composite,
+        "risk_flags": risks,
+        "structural": metrics.structural.__dict__,
+        "activity": metrics.activity.__dict__,
+        "quality": metrics.quality.__dict__,
+    }
+
+
+def build_compact_metrics_report(
+    metrics: RepositoryMetrics,
+    *,
+    preset: Optional[MetricsPreset] = None,
+) -> Dict[str, Any]:
+    """
+    Build a compact report intended for CLI output.
+    """
+    preset = preset or RELAXED_PRESET
+
+    composite = compute_composite_score(
+        metrics.structural,
+        metrics.activity,
+        metrics.quality,
+        weights=preset.weights,
+    )
+
+    return {
+        "score": composite["total_score"],
+        "inactive": metrics.activity.inactive,
+        "bus_factor": metrics.quality.bus_factor,
+        "commits_per_day": metrics.activity.commits_per_day,
+        "languages": len(metrics.structural.languages),
+        "files": metrics.structural.files_counted,
+    }
+
+
+# =============================================================================
+# Export helpers
+# =============================================================================
+
+def export_metrics_to_json(
+    report: Dict[str, Any],
+    *,
+    indent: int = 2,
+) -> str:
+    """
+    Export metrics report to JSON string.
+    """
+    import json
+
+    return json.dumps(report, indent=indent, sort_keys=True)
+
+
+def export_metrics_to_markdown(
+    report: Dict[str, Any],
+) -> str:
+    """
+    Export metrics report to a human-readable Markdown summary.
+    """
+    lines: List[str] = []
+
+    lines.append(f"# Repository Metrics Report ({report['preset']})")
+    lines.append("")
+    lines.append(f"**Generated at:** {report['generated_at']}")
+    lines.append("")
+    lines.append(f"## Overall Score: {report['scores']['total_score']}")
+    lines.append("")
+
+    if report["risk_flags"]:
+        lines.append("## ⚠ Risk Flags")
+        for flag in report["risk_flags"]:
+            lines.append(f"- {flag}")
+        lines.append("")
+    else:
+        lines.append("No significant risk flags detected.\n")
+
+    lines.append("## Activity")
+    lines.append(f"- Commits per day: {report['activity']['commits_per_day']}")
+    lines.append(f"- Days active: {report['activity']['days_active']}")
+    lines.append("")
+
+    lines.append("## Structure")
+    lines.append(f"- Files counted: {report['structural']['files_counted']}")
+    lines.append(f"- Languages: {len(report['structural']['languages'])}")
+    lines.append("")
+
+    lines.append("## Quality")
+    lines.append(f"- Bus factor: {report['quality']['bus_factor']}")
+    lines.append(
+        f"- Meaningful commit ratio: "
+        f"{report['quality']['meaningful_commit_ratio']}"
+    )
+
+    return "\n".join(lines)
+
+
+# =============================================================================
+# Final orchestration wrappers
+# =============================================================================
+
+def analyze_repository(
+    repo_path: Path,
+    *,
+    preset_name: str = "relaxed",
+    max_commits: Optional[int] = None,
+    include_raw: bool = False,
+) -> Dict[str, Any]:
+    """
+    High-level orchestration wrapper.
+
+    This is the main entry point intended for CLI or API usage.
+    """
+    preset = PRESETS.get(preset_name)
+    if not preset:
+        raise RepositoryMetricsError(
+            f"Unknown metrics preset: {preset_name}"
+        )
+
+    metrics = compute_repository_metrics(
+        repo_path,
+        max_commits=max_commits,
+        include_raw=include_raw,
+    )
+
+    report = build_metrics_report(
+        metrics,
+        preset=preset,
+    )
+
+    return report
+
+
+def analyze_repository_compact(
+    repo_path: Path,
+    *,
+    preset_name: str = "relaxed",
+    max_commits: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Compact orchestration wrapper for CLI summaries.
+    """
+    preset = PRESETS.get(preset_name)
+    if not preset:
+        raise RepositoryMetricsError(
+            f"Unknown metrics preset: {preset_name}"
+        )
+
+    metrics = compute_repository_metrics(
+        repo_path,
+        max_commits=max_commits,
+        include_raw=False,
+    )
+
+    return build_compact_metrics_report(
+        metrics,
+        preset=preset,
+    )
+
+
+# =============================================================================
+# End of module
+# =============================================================================
