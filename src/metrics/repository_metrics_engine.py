@@ -734,6 +734,233 @@ def analyze_repository_compact(
         preset=preset,
     )
 
+# =============================================================================
+# Historical trend & stability analysis
+# =============================================================================
+
+def compute_activity_trend(
+    commits_per_day: float,
+    *,
+    low_threshold: float = 0.01,
+    high_threshold: float = 0.1,
+) -> str:
+    """
+    Classify activity trend based on commit frequency.
+    """
+    if commits_per_day >= high_threshold:
+        return "high"
+    if commits_per_day >= low_threshold:
+        return "moderate"
+    return "low"
+
+
+def compute_churn_stability(
+    churn_average: float,
+    *,
+    stable_threshold: float = 200.0,
+    volatile_threshold: float = 600.0,
+) -> str:
+    """
+    Classify churn stability.
+    """
+    if churn_average <= stable_threshold:
+        return "stable"
+    if churn_average <= volatile_threshold:
+        return "moderate"
+    return "volatile"
+
+
+def compute_bus_factor_risk(
+    bus_factor: int,
+) -> str:
+    """
+    Classify bus factor risk.
+    """
+    if bus_factor >= 4:
+        return "low"
+    if bus_factor >= 2:
+        return "medium"
+    return "high"
+
+
+# =============================================================================
+# Metric deltas & normalization helpers
+# =============================================================================
+
+def compute_metric_delta(
+    current: float,
+    previous: Optional[float],
+) -> Optional[float]:
+    """
+    Compute delta between current and previous metric values.
+    """
+    if previous is None:
+        return None
+    return round(current - previous, 4)
+
+
+def compute_activity_delta(
+    current: ActivityMetrics,
+    previous: Optional[ActivityMetrics],
+) -> Dict[str, Optional[float]]:
+    """
+    Compute deltas for activity metrics.
+    """
+    if previous is None:
+        return {
+            "commits_per_day": None,
+            "days_active": None,
+        }
+
+    return {
+        "commits_per_day": compute_metric_delta(
+            current.commits_per_day,
+            previous.commits_per_day,
+        ),
+        "days_active": compute_metric_delta(
+            current.days_active,
+            previous.days_active,
+        ),
+    }
+
+
+def compute_quality_delta(
+    current: QualitySignals,
+    previous: Optional[QualitySignals],
+) -> Dict[str, Optional[float]]:
+    """
+    Compute deltas for quality signals.
+    """
+    if previous is None:
+        return {
+            "bus_factor": None,
+            "meaningful_commit_ratio": None,
+            "churn_average": None,
+        }
+
+    return {
+        "bus_factor": compute_metric_delta(
+            current.bus_factor,
+            previous.bus_factor,
+        ),
+        "meaningful_commit_ratio": compute_metric_delta(
+            current.meaningful_commit_ratio,
+            previous.meaningful_commit_ratio,
+        ),
+        "churn_average": compute_metric_delta(
+            current.churn_average,
+            previous.churn_average,
+        ),
+    }
+
+
+# =============================================================================
+# Grading & explainability
+# =============================================================================
+
+def grade_score(score: float) -> str:
+    """
+    Convert a numeric score into a letter grade.
+    """
+    if score >= 0.85:
+        return "A"
+    if score >= 0.7:
+        return "B"
+    if score >= 0.55:
+        return "C"
+    return "D"
+
+
+def explain_score_components(
+    composite: Dict[str, Any],
+) -> Dict[str, str]:
+    """
+    Provide human-readable explanations for score components.
+    """
+    explanations: Dict[str, str] = {}
+
+    for key, section in composite["breakdown"].items():
+        score = section["score"]
+        grade = grade_score(score)
+
+        explanations[key] = (
+            f"{key.capitalize()} score {score} "
+            f"(grade {grade})"
+        )
+
+    return explanations
+
+
+# =============================================================================
+# Extended evaluation summary
+# =============================================================================
+
+def build_evaluation_summary(
+    metrics: RepositoryMetrics,
+    *,
+    preset: MetricsPreset,
+) -> Dict[str, Any]:
+    """
+    Build an extended evaluation summary with trends and grades.
+    """
+    composite = compute_composite_score(
+        metrics.structural,
+        metrics.activity,
+        metrics.quality,
+        weights=preset.weights,
+    )
+
+    summary = {
+        "overall_score": composite["total_score"],
+        "grade": grade_score(composite["total_score"]),
+        "activity_trend": compute_activity_trend(
+            metrics.activity.commits_per_day
+        ),
+        "churn_stability": compute_churn_stability(
+            metrics.quality.churn_average
+        ),
+        "bus_factor_risk": compute_bus_factor_risk(
+            metrics.quality.bus_factor
+        ),
+        "explanations": explain_score_components(composite),
+    }
+
+    return summary
+
+
+def build_full_evaluation(
+    repo_path: Path,
+    *,
+    preset_name: str = "relaxed",
+    max_commits: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Build a full evaluation including metrics, scores, and explanations.
+    """
+    preset = PRESETS.get(preset_name)
+    if not preset:
+        raise RepositoryMetricsError(
+            f"Unknown metrics preset: {preset_name}"
+        )
+
+    metrics = compute_repository_metrics(
+        repo_path,
+        max_commits=max_commits,
+        include_raw=False,
+    )
+
+    report = build_metrics_report(
+        metrics,
+        preset=preset,
+    )
+
+    report["evaluation"] = build_evaluation_summary(
+        metrics,
+        preset=preset,
+    )
+
+    return report
+
 
 # =============================================================================
 # End of module
