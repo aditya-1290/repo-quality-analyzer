@@ -749,6 +749,223 @@ def analyze_repository_dependencies(
         "recommendations": analysis.recommendations,
     }
 
+# =============================================================================
+# Dependency graph construction
+# =============================================================================
+
+@dataclass
+class DependencyNode:
+    name: str
+    info: DependencyInfo
+    dependencies: Set[str] = field(default_factory=set)
+    dependents: Set[str] = field(default_factory=set)
+    risk_score: float = 0.0
+
+
+@dataclass
+class DependencyGraph:
+    nodes: Dict[str, DependencyNode] = field(default_factory=dict)
+
+    def add_node(self, dep: DependencyInfo) -> None:
+        if dep.name not in self.nodes:
+            self.nodes[dep.name] = DependencyNode(
+                name=dep.name,
+                info=dep,
+            )
+
+    def add_edge(self, parent: str, child: str) -> None:
+        if parent not in self.nodes or child not in self.nodes:
+            return
+        self.nodes[parent].dependencies.add(child)
+        self.nodes[child].dependents.add(parent)
+
+    def get_leaf_dependencies(self) -> List[DependencyNode]:
+        return [
+            node for node in self.nodes.values()
+            if not node.dependencies
+        ]
+
+    def get_root_dependencies(self) -> List[DependencyNode]:
+        return [
+            node for node in self.nodes.values()
+            if not node.dependents
+        ]
+
+
+def build_dependency_graph(
+    deps: Dict[str, DependencyInfo],
+) -> DependencyGraph:
+    """
+    Build a static dependency graph.
+    """
+    graph = DependencyGraph()
+
+    for dep in deps.values():
+        graph.add_node(dep)
+
+    # Static approximation: assume runtime deps depend on build/dev deps
+    runtime = [
+        d.name for d in deps.values()
+        if d.dependency_type == DependencyType.RUNTIME
+    ]
+    others = [
+        d.name for d in deps.values()
+        if d.dependency_type != DependencyType.RUNTIME
+    ]
+
+    for r in runtime:
+        for o in others:
+            graph.add_edge(r, o)
+
+    return graph
+
+# =============================================================================
+# Dependency-level risk scoring
+# =============================================================================
+
+def compute_dependency_risk(dep: DependencyInfo) -> float:
+    """
+    Compute a risk score for a single dependency.
+    """
+    score = 0.0
+
+    if dep.is_vulnerable():
+        score += 0.5
+
+    if dep.version and dep.version.startswith("0."):
+        score += 0.2
+
+    if dep.license in {LicenseType.GPL, LicenseType.PROPRIETARY}:
+        score += 0.2
+
+    if dep.dependency_type == DependencyType.OPTIONAL:
+        score -= 0.1
+
+    return min(1.0, round(score, 3))
+
+
+def attach_dependency_risk_scores(
+    graph: DependencyGraph,
+) -> None:
+    """
+    Attach risk scores to dependency graph nodes.
+    """
+    for node in graph.nodes.values():
+        node.risk_score = compute_dependency_risk(node.info)
+
+
+# =============================================================================
+# Freshness & maintenance heuristics
+# =============================================================================
+
+def estimate_dependency_freshness(
+    dep: DependencyInfo,
+) -> str:
+    """
+    Estimate freshness based on version semantics.
+    """
+    if not dep.version:
+        return "unknown"
+
+    if "dev" in dep.version or "alpha" in dep.version:
+        return "experimental"
+
+    if dep.version.startswith("0."):
+        return "early"
+
+    major = re.findall(r"\d+", dep.version)
+    if major and int(major[0]) >= 1:
+        return "stable"
+
+    return "unknown"
+
+
+def compute_freshness_summary(
+    deps: Dict[str, DependencyInfo],
+) -> Dict[str, int]:
+    summary: Dict[str, int] = {}
+
+    for dep in deps.values():
+        status = estimate_dependency_freshness(dep)
+        summary[status] = summary.get(status, 0) + 1
+
+    return summary
+
+
+# =============================================================================
+# Policy & rule evaluation
+# =============================================================================
+
+@dataclass
+class DependencyPolicy:
+    max_vulnerable: int = 0
+    disallowed_licenses: Set[LicenseType] = field(default_factory=set)
+    allow_pre_release: bool = False
+
+
+def evaluate_dependency_policy(
+    analysis: DependencyAnalysis,
+    *,
+    policy: DependencyPolicy,
+) -> List[str]:
+    """
+    Evaluate dependency analysis against a policy.
+    """
+    violations: List[str] = []
+
+    if analysis.vulnerable_dependencies > policy.max_vulnerable:
+        violations.append(
+            f"Vulnerable dependencies exceed limit ({analysis.vulnerable_dependencies})"
+        )
+
+    for dep in analysis.dependencies.values():
+        if dep.license in policy.disallowed_licenses:
+            violations.append(
+                f"Disallowed license detected: {dep.name} ({dep.license.value})"
+            )
+
+        if not policy.allow_pre_release:
+            if dep.version and any(
+                k in dep.version for k in ("alpha", "beta", "dev")
+            ):
+                violations.append(
+                    f"Pre-release dependency detected: {dep.name}"
+                )
+
+    return violations
+
+
+# =============================================================================
+# Extended orchestration helpers
+# =============================================================================
+
+def analyze_dependencies_with_graph(
+    repo_path: Path,
+) -> Dict[str, object]:
+    """
+    Analyze dependencies and include graph-based insights.
+    """
+    analysis = analyze_dependency_files(repo_path)
+
+    graph = build_dependency_graph(analysis.dependencies)
+    attach_dependency_risk_scores(graph)
+
+    freshness = compute_freshness_summary(analysis.dependencies)
+
+    return {
+        "summary": summarize_dependencies(analysis),
+        "health_score": analysis.health_score,
+        "freshness": freshness,
+        "high_risk_dependencies": [
+            node.name for node in graph.nodes.values()
+            if node.risk_score >= 0.5
+        ],
+        "dependency_graph": {
+            "nodes": len(graph.nodes),
+            "edges": sum(len(n.dependencies) for n in graph.nodes.values()),
+        },
+        "recommendations": analysis.recommendations,
+    }
 
 # =============================================================================
 # End of dependency analyzer
