@@ -1226,6 +1226,203 @@ def analyze_dependency_conflicts(
         "version_divergence": divergence,
     }
 
+# =============================================================================
+# Detailed findings & explainability engine
+# =============================================================================
+
+@dataclass
+class DependencyFinding:
+    """
+    Represents a detailed finding for a single dependency.
+    """
+    name: str
+    severity: str
+    category: str
+    message: str
+    evidence: Dict[str, object]
+
+
+def generate_dependency_findings(
+    dep: DependencyInfo,
+) -> List[DependencyFinding]:
+    """
+    Generate detailed findings for a single dependency.
+    """
+    findings: List[DependencyFinding] = []
+
+    # Vulnerability findings
+    for vuln in dep.vulnerabilities:
+        findings.append(
+            DependencyFinding(
+                name=dep.name,
+                severity=vuln.severity.value,
+                category="vulnerability",
+                message=f"Vulnerability detected: {vuln.identifier}",
+                evidence={
+                    "version": dep.version,
+                    "description": vuln.description,
+                },
+            )
+        )
+
+    # License findings
+    if dep.license in {LicenseType.GPL, LicenseType.PROPRIETARY}:
+        findings.append(
+            DependencyFinding(
+                name=dep.name,
+                severity="medium",
+                category="license",
+                message=f"Potentially restrictive license: {dep.license.value}",
+                evidence={
+                    "license": dep.license.value,
+                },
+            )
+        )
+
+    # Version findings
+    if dep.version:
+        if dep.version.startswith("0."):
+            findings.append(
+                DependencyFinding(
+                    name=dep.name,
+                    severity="medium",
+                    category="stability",
+                    message="Dependency uses major version zero",
+                    evidence={
+                        "version": dep.version,
+                    },
+                )
+            )
+
+        if any(k in dep.version for k in ("alpha", "beta", "dev")):
+            findings.append(
+                DependencyFinding(
+                    name=dep.name,
+                    severity="low",
+                    category="stability",
+                    message="Pre-release dependency version detected",
+                    evidence={
+                        "version": dep.version,
+                    },
+                )
+            )
+
+    # Dependency type findings
+    if dep.dependency_type == DependencyType.OPTIONAL:
+        findings.append(
+            DependencyFinding(
+                name=dep.name,
+                severity="info",
+                category="classification",
+                message="Optional dependency",
+                evidence={},
+            )
+        )
+
+    return findings
+
+
+def generate_all_findings(
+    analysis: DependencyAnalysis,
+) -> List[DependencyFinding]:
+    """
+    Generate findings for all dependencies.
+    """
+    all_findings: List[DependencyFinding] = []
+
+    for dep in analysis.dependencies.values():
+        all_findings.extend(generate_dependency_findings(dep))
+
+    return all_findings
+
+
+def summarize_findings(
+    findings: List[DependencyFinding],
+) -> Dict[str, int]:
+    """
+    Summarize findings by severity.
+    """
+    summary: Dict[str, int] = {}
+
+    for f in findings:
+        summary[f.severity] = summary.get(f.severity, 0) + 1
+
+    return summary
+
+
+def explain_dependency_risk(
+    dep: DependencyInfo,
+) -> str:
+    """
+    Provide a human-readable explanation of dependency risk.
+    """
+    reasons: List[str] = []
+
+    if dep.is_vulnerable():
+        reasons.append("known vulnerabilities")
+
+    if dep.version and dep.version.startswith("0."):
+        reasons.append("major version zero")
+
+    if dep.license in {LicenseType.GPL, LicenseType.PROPRIETARY}:
+        reasons.append("restrictive license")
+
+    if not dep.version:
+        reasons.append("missing version pin")
+
+    if not reasons:
+        return "No significant risk factors identified"
+
+    return "Risk due to: " + ", ".join(reasons)
+
+
+def build_explainability_report(
+    analysis: DependencyAnalysis,
+) -> Dict[str, object]:
+    """
+    Build an explainability-focused report for dependencies.
+    """
+    findings = generate_all_findings(analysis)
+
+    return {
+        "finding_summary": summarize_findings(findings),
+        "findings": [
+            {
+                "dependency": f.name,
+                "severity": f.severity,
+                "category": f.category,
+                "message": f.message,
+                "evidence": f.evidence,
+            }
+            for f in findings
+        ],
+        "explanations": {
+            dep.name: explain_dependency_risk(dep)
+            for dep in analysis.dependencies.values()
+        },
+    }
+
+
+# =============================================================================
+# Extended public API with explainability
+# =============================================================================
+
+def analyze_repository_dependencies_verbose(
+    repo_path: Path,
+) -> Dict[str, object]:
+    """
+    Extended dependency analysis including explainability details.
+    """
+    analysis = analyze_dependency_files(repo_path)
+    explainability = build_explainability_report(analysis)
+
+    return {
+        "summary": summarize_dependencies(analysis),
+        "health_score": analysis.health_score,
+        "recommendations": analysis.recommendations,
+        "explainability": explainability,
+    }
+
 
 # =============================================================================
 # End of dependency analyzer
