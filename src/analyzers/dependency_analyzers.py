@@ -968,5 +968,101 @@ def analyze_dependencies_with_graph(
     }
 
 # =============================================================================
+# Ecosystem-specific heuristics & confidence scoring
+# =============================================================================
+
+@dataclass
+class DependencyConfidence:
+    """
+    Represents confidence in correctness and stability of a dependency entry.
+    """
+    name: str
+    source: DependencySource
+    confidence_score: float
+    reasons: List[str] = field(default_factory=list)
+
+
+def compute_ecosystem_confidence(
+    dep: DependencyInfo,
+) -> DependencyConfidence:
+    """
+    Compute confidence score for a dependency based on ecosystem heuristics.
+    """
+    score = 1.0
+    reasons: List[str] = []
+
+    # Version presence
+    if not dep.version:
+        score -= 0.25
+        reasons.append("missing_version")
+
+    # Pre-release versions
+    if dep.version and any(k in dep.version for k in ("alpha", "beta", "dev")):
+        score -= 0.15
+        reasons.append("pre_release_version")
+
+    # Ecosystem-specific rules
+    if dep.source == DependencySource.PYTHON:
+        if dep.name.startswith("_"):
+            score -= 0.1
+            reasons.append("private_python_package")
+
+    elif dep.source == DependencySource.JAVASCRIPT:
+        if dep.name.startswith("@"):
+            score -= 0.05
+            reasons.append("scoped_package")
+
+    elif dep.source == DependencySource.JVM:
+        if ":" in dep.name:
+            score -= 0.05
+            reasons.append("multi_artifact_coordinate")
+
+    # License uncertainty
+    if dep.license == LicenseType.UNKNOWN:
+        score -= 0.15
+        reasons.append("unknown_license")
+
+    return DependencyConfidence(
+        name=dep.name,
+        source=dep.source,
+        confidence_score=max(0.0, round(score, 3)),
+        reasons=reasons,
+    )
+
+
+def compute_confidence_summary(
+    deps: Dict[str, DependencyInfo],
+) -> Dict[str, object]:
+    """
+    Compute confidence metrics across all dependencies.
+    """
+    confidences = [
+        compute_ecosystem_confidence(dep)
+        for dep in deps.values()
+    ]
+
+    low_conf = [
+        c for c in confidences if c.confidence_score < 0.6
+    ]
+
+    return {
+        "average_confidence": round(
+            sum(c.confidence_score for c in confidences) / len(confidences),
+            3,
+        ) if confidences else 1.0,
+        "low_confidence_dependencies": len(low_conf),
+        "details": [
+            {
+                "name": c.name,
+                "score": c.confidence_score,
+                "reasons": c.reasons,
+            }
+            for c in low_conf
+        ],
+    }
+
+
+
+# =============================================================================
 # End of dependency analyzer
 # =============================================================================
