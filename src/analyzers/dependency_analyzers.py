@@ -1061,6 +1061,170 @@ def compute_confidence_summary(
         ],
     }
 
+# =============================================================================
+# Dependency conflict & shadowing detection
+# =============================================================================
+
+@dataclass
+class DependencyConflict:
+    """
+    Represents a detected dependency conflict.
+    """
+    name: str
+    conflict_type: str
+    details: Dict[str, object]
+
+
+def detect_version_conflicts(
+    deps: Dict[str, DependencyInfo],
+) -> List[DependencyConflict]:
+    """
+    Detect dependencies that appear with conflicting versions.
+    """
+    seen: Dict[str, Set[str]] = {}
+    conflicts: List[DependencyConflict] = []
+
+    for dep in deps.values():
+        if not dep.version:
+            continue
+        key = dep.name.lower()
+        seen.setdefault(key, set()).add(dep.version)
+
+    for name, versions in seen.items():
+        if len(versions) > 1:
+            conflicts.append(
+                DependencyConflict(
+                    name=name,
+                    conflict_type="version_conflict",
+                    details={
+                        "versions": sorted(versions),
+                        "count": len(versions),
+                    },
+                )
+            )
+
+    return conflicts
+
+
+def detect_dependency_type_conflicts(
+    deps: Dict[str, DependencyInfo],
+) -> List[DependencyConflict]:
+    """
+    Detect dependencies that appear as multiple dependency types.
+    """
+    seen: Dict[str, Set[DependencyType]] = {}
+    conflicts: List[DependencyConflict] = []
+
+    for dep in deps.values():
+        key = dep.name.lower()
+        seen.setdefault(key, set()).add(dep.dependency_type)
+
+    for name, types in seen.items():
+        if len(types) > 1:
+            conflicts.append(
+                DependencyConflict(
+                    name=name,
+                    conflict_type="dependency_type_conflict",
+                    details={
+                        "types": [t.value for t in types],
+                    },
+                )
+            )
+
+    return conflicts
+
+
+def detect_ecosystem_shadowing(
+    deps: Dict[str, DependencyInfo],
+) -> List[DependencyConflict]:
+    """
+    Detect dependencies that exist across multiple ecosystems.
+    """
+    seen: Dict[str, Set[DependencySource]] = {}
+    conflicts: List[DependencyConflict] = []
+
+    for dep in deps.values():
+        key = dep.name.lower()
+        seen.setdefault(key, set()).add(dep.source)
+
+    for name, sources in seen.items():
+        if len(sources) > 1:
+            conflicts.append(
+                DependencyConflict(
+                    name=name,
+                    conflict_type="ecosystem_shadowing",
+                    details={
+                        "sources": [s.value for s in sources],
+                        "count": len(sources),
+                    },
+                )
+            )
+
+    return conflicts
+
+
+def compute_version_divergence(
+    deps: Dict[str, DependencyInfo],
+) -> Dict[str, float]:
+    """
+    Compute divergence score for dependencies with multiple versions.
+    """
+    divergence: Dict[str, float] = {}
+    versions_map: Dict[str, List[str]] = {}
+
+    for dep in deps.values():
+        if dep.version:
+            versions_map.setdefault(dep.name.lower(), []).append(dep.version)
+
+    for name, versions in versions_map.items():
+        if len(versions) <= 1:
+            continue
+
+        numeric_versions = []
+        for v in versions:
+            parts = re.findall(r"\d+", v)
+            if parts:
+                numeric_versions.append(int(parts[0]))
+
+        if len(numeric_versions) > 1:
+            diff = max(numeric_versions) - min(numeric_versions)
+            divergence[name] = round(diff / max(numeric_versions), 3)
+
+    return divergence
+
+
+# =============================================================================
+# Aggregated conflict analysis
+# =============================================================================
+
+def analyze_dependency_conflicts(
+    deps: Dict[str, DependencyInfo],
+) -> Dict[str, object]:
+    """
+    Perform full dependency conflict analysis.
+    """
+    version_conflicts = detect_version_conflicts(deps)
+    type_conflicts = detect_dependency_type_conflicts(deps)
+    shadowing_conflicts = detect_ecosystem_shadowing(deps)
+    divergence = compute_version_divergence(deps)
+
+    return {
+        "total_conflicts": (
+            len(version_conflicts)
+            + len(type_conflicts)
+            + len(shadowing_conflicts)
+        ),
+        "version_conflicts": [
+            c.__dict__ for c in version_conflicts
+        ],
+        "type_conflicts": [
+            c.__dict__ for c in type_conflicts
+        ],
+        "ecosystem_shadowing": [
+            c.__dict__ for c in shadowing_conflicts
+        ],
+        "version_divergence": divergence,
+    }
 
 
 # =============================================================================
