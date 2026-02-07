@@ -606,3 +606,150 @@ def generate_recommendations(
         recs.append("No major dependency issues detected")
 
     return recs
+
+# =============================================================================
+# Repository-level orchestration
+# =============================================================================
+
+def analyze_dependency_files(
+    repo_path: Path,
+) -> DependencyAnalysis:
+    """
+    Analyze all dependency files in a repository and aggregate results.
+    """
+    analysis = DependencyAnalysis()
+
+    discovered = discover_dependency_files(repo_path)
+    all_dependencies: Dict[str, DependencyInfo] = {}
+
+    for path, source in discovered.items():
+        try:
+            parsed = parse_dependency_file(path, source)
+        except Exception:
+            # Parsing errors should not fail the whole analysis
+            continue
+
+        analysis.sources_detected.add(source)
+        all_dependencies = merge_dependencies(all_dependencies, parsed)
+
+    all_dependencies = deduplicate_dependencies(all_dependencies)
+
+    analysis.dependencies = all_dependencies
+    analysis.total_dependencies = len(all_dependencies)
+
+    # Attach license and vulnerability information
+    attach_licenses(all_dependencies)
+    analysis.vulnerable_dependencies = attach_vulnerabilities(all_dependencies)
+
+    # Outdated detection
+    analysis.outdated_dependencies = mark_outdated_dependencies(all_dependencies)
+
+    # Health scoring & recommendations
+    analysis.health_score = compute_health_score(
+        total=analysis.total_dependencies,
+        vulnerable=analysis.vulnerable_dependencies,
+        outdated=analysis.outdated_dependencies,
+    )
+
+    analysis.recommendations = generate_recommendations(analysis)
+
+    return analysis
+
+
+# =============================================================================
+# Reporting helpers
+# =============================================================================
+
+def summarize_dependencies(
+    analysis: DependencyAnalysis,
+) -> Dict[str, int]:
+    """
+    Produce a compact summary of dependency analysis.
+    """
+    return {
+        "total": analysis.total_dependencies,
+        "vulnerable": analysis.vulnerable_dependencies,
+        "outdated": analysis.outdated_dependencies,
+        "sources": len(analysis.sources_detected),
+    }
+
+
+def categorize_dependencies(
+    analysis: DependencyAnalysis,
+) -> Dict[DependencyType, List[DependencyInfo]]:
+    """
+    Categorize dependencies by dependency type.
+    """
+    categories: Dict[DependencyType, List[DependencyInfo]] = {
+        DependencyType.RUNTIME: [],
+        DependencyType.DEVELOPMENT: [],
+        DependencyType.BUILD: [],
+        DependencyType.OPTIONAL: [],
+        DependencyType.PEER: [],
+        DependencyType.UNKNOWN: [],
+    }
+
+    for dep in analysis.dependencies.values():
+        categories.setdefault(dep.dependency_type, []).append(dep)
+
+    return categories
+
+
+def group_dependencies_by_source(
+    analysis: DependencyAnalysis,
+) -> Dict[DependencySource, List[DependencyInfo]]:
+    """
+    Group dependencies by detected source ecosystem.
+    """
+    grouped: Dict[DependencySource, List[DependencyInfo]] = {}
+
+    for dep in analysis.dependencies.values():
+        grouped.setdefault(dep.source, []).append(dep)
+
+    return grouped
+
+
+# =============================================================================
+# Public API
+# =============================================================================
+
+def analyze_repository_dependencies(
+    repo_path: Path,
+) -> Dict[str, object]:
+    """
+    Public API for dependency analysis.
+
+    Returns a JSON-serializable dictionary.
+    """
+    analysis = analyze_dependency_files(repo_path)
+
+    return {
+        "summary": summarize_dependencies(analysis),
+        "health_score": analysis.health_score,
+        "sources_detected": [s.value for s in analysis.sources_detected],
+        "dependencies": {
+            name: {
+                "version": dep.version,
+                "source": dep.source.value,
+                "type": dep.dependency_type.value,
+                "license": dep.license.value,
+                "vulnerable": dep.is_vulnerable(),
+                "vulnerabilities": [
+                    {
+                        "id": v.identifier,
+                        "severity": v.severity.value,
+                        "description": v.description,
+                        "fixed_version": v.fixed_version,
+                    }
+                    for v in dep.vulnerabilities
+                ],
+            }
+            for name, dep in analysis.dependencies.items()
+        },
+        "recommendations": analysis.recommendations,
+    }
+
+
+# =============================================================================
+# End of dependency analyzer
+# =============================================================================
