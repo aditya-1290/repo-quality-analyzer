@@ -150,3 +150,228 @@ def discover_dependency_files(repo_path: Path) -> Dict[Path, DependencySource]:
                 discovered[path] = DEPENDENCY_FILES[file]
 
     return discovered
+
+# =============================================================================
+# Version parsing & normalization
+# =============================================================================
+
+_VERSION_PATTERN = re.compile(
+    r"(?P<op>>=|<=|==|~=|>|<|\^)?\s*(?P<version>[0-9a-zA-Z\.\-\+]+)"
+)
+
+
+def normalize_version(version: Optional[str]) -> Optional[str]:
+    """
+    Normalize a version string by stripping operators and whitespace.
+    """
+    if not version:
+        return None
+
+    match = _VERSION_PATTERN.search(version)
+    if not match:
+        return version.strip()
+
+    return match.group("version").strip()
+
+
+def split_name_and_version(raw: str) -> Tuple[str, Optional[str]]:
+    """
+    Split a dependency specification into name and version.
+    """
+    for sep in ["==", ">=", "<=", "~=", ">", "<", "^"]:
+        if sep in raw:
+            name, version = raw.split(sep, 1)
+            return name.strip(), normalize_version(version)
+    return raw.strip(), None
+
+
+# =============================================================================
+# Python dependency parsing
+# =============================================================================
+
+def parse_requirements_txt(path: Path) -> Dict[str, DependencyInfo]:
+    """
+    Parse requirements.txt dependencies.
+    """
+    deps: Dict[str, DependencyInfo] = {}
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        name, version = split_name_and_version(line)
+        deps[name] = DependencyInfo(
+            name=name,
+            version=version,
+            source=DependencySource.PYTHON,
+            dependency_type=DependencyType.RUNTIME,
+        )
+
+    return deps
+
+
+def parse_pyproject_toml(path: Path) -> Dict[str, DependencyInfo]:
+    """
+    Parse pyproject.toml dependencies.
+    """
+    deps: Dict[str, DependencyInfo] = {}
+
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+
+    project = data.get("project", {})
+    for name, version in project.get("dependencies", {}).items():
+        deps[name] = DependencyInfo(
+            name=name,
+            version=normalize_version(version),
+            source=DependencySource.PYTHON,
+        )
+
+    for name, version in project.get("optional-dependencies", {}).items():
+        deps[name] = DependencyInfo(
+            name=name,
+            version=normalize_version(version),
+            source=DependencySource.PYTHON,
+            dependency_type=DependencyType.OPTIONAL,
+        )
+
+    return deps
+
+
+def parse_setup_cfg(path: Path) -> Dict[str, DependencyInfo]:
+    """
+    Parse setup.cfg dependencies.
+    """
+    deps: Dict[str, DependencyInfo] = {}
+
+    content = path.read_text(encoding="utf-8")
+    for line in content.splitlines():
+        if "=" in line and not line.strip().startswith("["):
+            name, version = line.split("=", 1)
+            deps[name.strip()] = DependencyInfo(
+                name=name.strip(),
+                version=normalize_version(version),
+                source=DependencySource.PYTHON,
+            )
+
+    return deps
+
+
+# =============================================================================
+# JavaScript dependency parsing
+# =============================================================================
+
+def parse_package_json(path: Path) -> Dict[str, DependencyInfo]:
+    """
+    Parse package.json dependencies.
+    """
+    deps: Dict[str, DependencyInfo] = {}
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    def _parse_section(section: str, dep_type: DependencyType):
+        for name, version in data.get(section, {}).items():
+            deps[name] = DependencyInfo(
+                name=name,
+                version=normalize_version(version),
+                source=DependencySource.JAVASCRIPT,
+                dependency_type=dep_type,
+            )
+
+    _parse_section("dependencies", DependencyType.RUNTIME)
+    _parse_section("devDependencies", DependencyType.DEVELOPMENT)
+    _parse_section("peerDependencies", DependencyType.PEER)
+    _parse_section("optionalDependencies", DependencyType.OPTIONAL)
+
+    return deps
+
+
+# =============================================================================
+# Go, Rust, PHP dependency parsing
+# =============================================================================
+
+def parse_go_mod(path: Path) -> Dict[str, DependencyInfo]:
+    """
+    Parse go.mod dependencies.
+    """
+    deps: Dict[str, DependencyInfo] = {}
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("require"):
+            parts = line.replace("require", "").strip().split()
+            if len(parts) >= 2:
+                name, version = parts[0], parts[1]
+                deps[name] = DependencyInfo(
+                    name=name,
+                    version=normalize_version(version),
+                    source=DependencySource.GO,
+                )
+
+    return deps
+
+
+def parse_cargo_toml(path: Path) -> Dict[str, DependencyInfo]:
+    """
+    Parse Cargo.toml dependencies.
+    """
+    deps: Dict[str, DependencyInfo] = {}
+
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    for name, meta in data.get("dependencies", {}).items():
+        version = meta if isinstance(meta, str) else meta.get("version")
+        deps[name] = DependencyInfo(
+            name=name,
+            version=normalize_version(version),
+            source=DependencySource.RUST,
+        )
+
+    return deps
+
+
+def parse_composer_json(path: Path) -> Dict[str, DependencyInfo]:
+    """
+    Parse composer.json dependencies.
+    """
+    deps: Dict[str, DependencyInfo] = {}
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for name, version in data.get("require", {}).items():
+        deps[name] = DependencyInfo(
+            name=name,
+            version=normalize_version(version),
+            source=DependencySource.PHP,
+        )
+
+    return deps
+
+
+# =============================================================================
+# Unified parser dispatch
+# =============================================================================
+
+def parse_dependency_file(
+    path: Path,
+    source: DependencySource,
+) -> Dict[str, DependencyInfo]:
+    """
+    Dispatch dependency parsing based on file type.
+    """
+    filename = path.name
+
+    if filename == "requirements.txt":
+        return parse_requirements_txt(path)
+    if filename == "pyproject.toml":
+        return parse_pyproject_toml(path)
+    if filename == "setup.cfg":
+        return parse_setup_cfg(path)
+    if filename == "package.json":
+        return parse_package_json(path)
+    if filename == "go.mod":
+        return parse_go_mod(path)
+    if filename == "Cargo.toml":
+        return parse_cargo_toml(path)
+    if filename == "composer.json":
+        return parse_composer_json(path)
+
+    return {}
