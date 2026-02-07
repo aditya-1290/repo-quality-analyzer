@@ -375,3 +375,234 @@ def parse_dependency_file(
         return parse_composer_json(path)
 
     return {}
+
+# =============================================================================
+# Dependency merging & deduplication
+# =============================================================================
+
+def merge_dependencies(
+    existing: Dict[str, DependencyInfo],
+    incoming: Dict[str, DependencyInfo],
+) -> Dict[str, DependencyInfo]:
+    """
+    Merge two dependency maps, preferring richer metadata.
+    """
+    merged = dict(existing)
+
+    for name, dep in incoming.items():
+        if name not in merged:
+            merged[name] = dep
+            continue
+
+        current = merged[name]
+
+        # Prefer version if missing
+        if not current.version and dep.version:
+            current.version = dep.version
+
+        # Prefer non-unknown dependency type
+        if current.dependency_type == DependencyType.UNKNOWN:
+            current.dependency_type = dep.dependency_type
+
+        # Merge vulnerabilities
+        current.vulnerabilities.extend(dep.vulnerabilities)
+
+    return merged
+
+
+def deduplicate_dependencies(
+    deps: Dict[str, DependencyInfo],
+) -> Dict[str, DependencyInfo]:
+    """
+    Deduplicate dependencies by normalized name.
+    """
+    normalized: Dict[str, DependencyInfo] = {}
+
+    for name, dep in deps.items():
+        key = name.lower()
+        if key not in normalized:
+            normalized[key] = dep
+        else:
+            normalized[key] = merge_dependencies(
+                {key: normalized[key]},
+                {key: dep},
+            )[key]
+
+    return normalized
+
+
+# =============================================================================
+# Outdated dependency detection (safe heuristic)
+# =============================================================================
+
+def is_version_outdated(
+    version: Optional[str],
+) -> bool:
+    """
+    Heuristic outdated detection.
+
+    This avoids network calls and serves as a placeholder
+    for future registry integrations.
+    """
+    if not version:
+        return False
+
+    parts = re.findall(r"\d+", version)
+    if not parts:
+        return False
+
+    try:
+        major = int(parts[0])
+        return major == 0
+    except ValueError:
+        return False
+
+
+def mark_outdated_dependencies(
+    deps: Dict[str, DependencyInfo],
+) -> int:
+    """
+    Mark outdated dependencies and return count.
+    """
+    count = 0
+    for dep in deps.values():
+        if is_version_outdated(dep.version):
+            count += 1
+    return count
+
+
+# =============================================================================
+# License analysis hooks
+# =============================================================================
+
+def resolve_license(
+    dep_name: str,
+) -> LicenseType:
+    """
+    Resolve dependency license.
+
+    Placeholder for SPDX / registry integration.
+    """
+    name = dep_name.lower()
+
+    if name.startswith("django") or name.startswith("flask"):
+        return LicenseType.BSD
+    if name.startswith("numpy") or name.startswith("pandas"):
+        return LicenseType.BSD
+    if name.startswith("react") or name.startswith("vue"):
+        return LicenseType.MIT
+
+    return LicenseType.UNKNOWN
+
+
+def attach_licenses(
+    deps: Dict[str, DependencyInfo],
+) -> None:
+    """
+    Attach license metadata to dependencies.
+    """
+    for dep in deps.values():
+        dep.license = resolve_license(dep.name)
+
+
+# =============================================================================
+# Vulnerability analysis hooks
+# =============================================================================
+
+def resolve_vulnerabilities(
+    dep_name: str,
+    version: Optional[str],
+) -> List[Vulnerability]:
+    """
+    Placeholder vulnerability resolver.
+
+    Safe, deterministic, and offline.
+    """
+    vulns: List[Vulnerability] = []
+
+    if not version:
+        return vulns
+
+    if "alpha" in version or "beta" in version:
+        vulns.append(
+            Vulnerability(
+                identifier=f"PRE-{dep_name.upper()}-001",
+                severity=VulnerabilitySeverity.MEDIUM,
+                description="Pre-release version detected",
+            )
+        )
+
+    if version.startswith("0."):
+        vulns.append(
+            Vulnerability(
+                identifier=f"ZERO-{dep_name.upper()}-001",
+                severity=VulnerabilitySeverity.HIGH,
+                description="Major version zero dependency",
+            )
+        )
+
+    return vulns
+
+
+def attach_vulnerabilities(
+    deps: Dict[str, DependencyInfo],
+) -> int:
+    """
+    Attach vulnerabilities and return vulnerable count.
+    """
+    count = 0
+    for dep in deps.values():
+        dep.vulnerabilities = resolve_vulnerabilities(dep.name, dep.version)
+        if dep.is_vulnerable():
+            count += 1
+    return count
+
+
+# =============================================================================
+# Health scoring & recommendations
+# =============================================================================
+
+def compute_health_score(
+    total: int,
+    vulnerable: int,
+    outdated: int,
+) -> float:
+    """
+    Compute a dependency health score between 0 and 1.
+    """
+    if total == 0:
+        return 1.0
+
+    penalty = (
+        (vulnerable / total) * 0.6
+        + (outdated / total) * 0.4
+    )
+
+    return max(0.0, round(1.0 - penalty, 3))
+
+
+def generate_recommendations(
+    analysis: DependencyAnalysis,
+) -> List[str]:
+    """
+    Generate human-readable recommendations.
+    """
+    recs: List[str] = []
+
+    if analysis.vulnerable_dependencies > 0:
+        recs.append(
+            f"{analysis.vulnerable_dependencies} vulnerable dependencies detected"
+        )
+
+    if analysis.outdated_dependencies > 0:
+        recs.append(
+            f"{analysis.outdated_dependencies} outdated dependencies detected"
+        )
+
+    if analysis.health_score < 0.7:
+        recs.append("Dependency health score is below recommended threshold")
+
+    if not recs:
+        recs.append("No major dependency issues detected")
+
+    return recs
