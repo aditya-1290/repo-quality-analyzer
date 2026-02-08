@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from src.analyzers.dependency_analyzer import (
+from src.analyzers.dependency_analyzers import (
     DependencyType,
     DependencySource,
     LicenseType,
