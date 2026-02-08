@@ -490,3 +490,196 @@ def test_dependency_insights_contains_all_sections(repo: Path):
     assert "high_risk_dependencies" in insights
     assert "usage_profiles" in insights
     assert "upgrade_impacts" in insights
+
+# =============================================================================
+# Multi-ecosystem parsing & aggregation
+# =============================================================================
+
+def test_multi_ecosystem_repository(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    (repo / "requirements.txt").write_text(
+        "requests==2.31.0\nnumpy==1.26.0\n",
+        encoding="utf-8",
+    )
+
+    (repo / "package.json").write_text(
+        json.dumps(
+            {
+                "dependencies": {"react": "^18.0.0"},
+                "devDependencies": {"eslint": "^8.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    analysis = analyze_dependency_files(repo)
+
+    assert analysis.total_dependencies >= 4
+    assert DependencySource.PYTHON in analysis.sources_detected
+    assert DependencySource.JAVASCRIPT in analysis.sources_detected
+
+
+# =============================================================================
+# Health score edge cases
+# =============================================================================
+
+def test_health_score_no_dependencies():
+    score = compute_health_score(
+        total=0,
+        vulnerable=0,
+        outdated=0,
+    )
+    assert score == 1.0
+
+
+def test_health_score_all_vulnerable():
+    score = compute_health_score(
+        total=5,
+        vulnerable=5,
+        outdated=5,
+    )
+    assert score == 0.0
+
+
+# =============================================================================
+# Recommendation generation robustness
+# =============================================================================
+
+def test_recommendations_no_issues():
+    analysis = DependencyAnalysis(
+        total_dependencies=3,
+        vulnerable_dependencies=0,
+        outdated_dependencies=0,
+        health_score=1.0,
+    )
+    recs = generate_recommendations(analysis)
+    assert len(recs) == 1
+    assert "No major dependency issues" in recs[0]
+
+
+def test_recommendations_multiple_issues():
+    analysis = DependencyAnalysis(
+        total_dependencies=10,
+        vulnerable_dependencies=3,
+        outdated_dependencies=4,
+        health_score=0.4,
+    )
+    recs = generate_recommendations(analysis)
+    assert len(recs) >= 2
+
+
+# =============================================================================
+# Confidence summary determinism
+# =============================================================================
+
+def test_confidence_summary_deterministic(repo: Path):
+    analysis = analyze_dependency_files(repo)
+
+    s1 = compute_confidence_summary(analysis.dependencies)
+    s2 = compute_confidence_summary(analysis.dependencies)
+
+    assert s1 == s2
+
+
+# =============================================================================
+# Conflict analysis corner cases
+# =============================================================================
+
+def test_conflict_analysis_no_conflicts():
+    deps = {
+        "a": DependencyInfo("a", "1.0.0", DependencySource.PYTHON),
+        "b": DependencyInfo("b", "2.0.0", DependencySource.PYTHON),
+    }
+
+    conflicts = analyze_dependency_conflicts(deps)
+    assert conflicts["total_conflicts"] == 0
+
+
+def test_conflict_analysis_multiple_types():
+    deps = {
+        "x": DependencyInfo("x", "1.0.0", DependencySource.PYTHON),
+        "x_dev": DependencyInfo(
+            "x",
+            "1.0.0",
+            DependencySource.PYTHON,
+            dependency_type=DependencyType.DEVELOPMENT,
+        ),
+        "x_js": DependencyInfo("x", "1.0.0", DependencySource.JAVASCRIPT),
+    }
+
+    conflicts = analyze_dependency_conflicts(deps)
+    assert conflicts["total_conflicts"] >= 2
+
+
+# =============================================================================
+# Explainability aggregation integrity
+# =============================================================================
+
+def test_explainability_summary_matches_findings(repo: Path):
+    analysis = analyze_dependency_files(repo)
+    report = build_explainability_report(analysis)
+
+    summary = report["finding_summary"]
+    findings = report["findings"]
+
+    assert sum(summary.values()) == len(findings)
+
+
+def test_explainability_has_all_dependencies(repo: Path):
+    analysis = analyze_dependency_files(repo)
+    report = build_explainability_report(analysis)
+
+    explanations = report["explanations"]
+    for name in analysis.dependencies:
+        assert name in explanations
+
+
+# =============================================================================
+# Usage profile consistency
+# =============================================================================
+
+def test_usage_profile_reasoning_not_empty(repo: Path):
+    analysis = analyze_dependency_files(repo)
+    insights = build_dependency_insights(analysis)
+
+    for profile in insights["usage_profiles"].values():
+        assert profile["reasoning"]
+
+
+# =============================================================================
+# Upgrade impact consistency
+# =============================================================================
+
+def test_upgrade_impact_present_for_all_dependencies(repo: Path):
+    analysis = analyze_dependency_files(repo)
+    insights = build_dependency_insights(analysis)
+
+    impacts = insights["upgrade_impacts"]
+    for dep_name in analysis.dependencies:
+        assert dep_name in impacts
+
+
+def test_upgrade_impact_risk_levels_valid(repo: Path):
+    analysis = analyze_dependency_files(repo)
+    insights = build_dependency_insights(analysis)
+
+    for impact in insights["upgrade_impacts"].values():
+        assert impact["risk_level"] in {
+            "low",
+            "medium",
+            "high",
+            "unknown",
+        }
+
+
+# =============================================================================
+# End-to-end stability
+# =============================================================================
+
+def test_full_dependency_analysis_is_stable(repo: Path):
+    result1 = analyze_repository_dependencies(repo)
+    result2 = analyze_repository_dependencies(repo)
+
+    assert result1 == result2
