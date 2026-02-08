@@ -1423,6 +1423,236 @@ def analyze_repository_dependencies_verbose(
         "explainability": explainability,
     }
 
+# =============================================================================
+# Dependency usage classification
+# =============================================================================
+
+@dataclass
+class DependencyUsageProfile:
+    """
+    Represents how a dependency is likely used within the project.
+    """
+    name: str
+    usage_type: str
+    criticality: str
+    reasoning: List[str]
+
+
+def classify_dependency_usage(
+    dep: DependencyInfo,
+) -> DependencyUsageProfile:
+    """
+    Classify dependency usage and criticality heuristically.
+    """
+    reasons: List[str] = []
+
+    # Default assumptions
+    usage_type = "direct"
+    criticality = "medium"
+
+    if dep.dependency_type in {
+        DependencyType.DEVELOPMENT,
+        DependencyType.BUILD,
+    }:
+        usage_type = "tooling"
+        criticality = "low"
+        reasons.append("development_or_build_dependency")
+
+    if dep.dependency_type == DependencyType.RUNTIME:
+        usage_type = "runtime"
+        reasons.append("runtime_dependency")
+
+    if dep.is_vulnerable():
+        criticality = "high"
+        reasons.append("has_known_vulnerabilities")
+
+    if dep.version and dep.version.startswith("0."):
+        reasons.append("early_version_dependency")
+
+    if dep.license in {LicenseType.GPL, LicenseType.PROPRIETARY}:
+        reasons.append("restrictive_license")
+
+    if not reasons:
+        reasons.append("no_special_risk_indicators")
+
+    return DependencyUsageProfile(
+        name=dep.name,
+        usage_type=usage_type,
+        criticality=criticality,
+        reasoning=reasons,
+    )
+
+
+def build_usage_profiles(
+    deps: Dict[str, DependencyInfo],
+) -> Dict[str, DependencyUsageProfile]:
+    """
+    Build usage profiles for all dependencies.
+    """
+    return {
+        dep.name: classify_dependency_usage(dep)
+        for dep in deps.values()
+    }
+
+
+# =============================================================================
+# Upgrade impact simulation
+# =============================================================================
+
+@dataclass
+class UpgradeImpact:
+    """
+    Represents potential impact of upgrading a dependency.
+    """
+    name: str
+    current_version: Optional[str]
+    risk_level: str
+    estimated_effort: str
+    notes: List[str]
+
+
+def estimate_upgrade_impact(
+    dep: DependencyInfo,
+) -> UpgradeImpact:
+    """
+    Estimate the impact of upgrading a dependency.
+    """
+    notes: List[str] = []
+    risk_level = "low"
+    effort = "low"
+
+    if not dep.version:
+        return UpgradeImpact(
+            name=dep.name,
+            current_version=None,
+            risk_level="unknown",
+            estimated_effort="unknown",
+            notes=["version_not_pinned"],
+        )
+
+    major_numbers = re.findall(r"\d+", dep.version)
+    if major_numbers:
+        major = int(major_numbers[0])
+        if major == 0:
+            risk_level = "high"
+            effort = "medium"
+            notes.append("unstable_major_version")
+        elif major >= 1:
+            risk_level = "medium"
+            effort = "medium"
+            notes.append("semantic_versioning_applies")
+
+    if dep.is_vulnerable():
+        risk_level = "high"
+        notes.append("security_fix_recommended")
+
+    if dep.dependency_type in {
+        DependencyType.DEVELOPMENT,
+        DependencyType.BUILD,
+    }:
+        effort = "low"
+        notes.append("tooling_dependency")
+
+    return UpgradeImpact(
+        name=dep.name,
+        current_version=dep.version,
+        risk_level=risk_level,
+        estimated_effort=effort,
+        notes=notes,
+    )
+
+
+def simulate_upgrade_impacts(
+    deps: Dict[str, DependencyInfo],
+) -> Dict[str, UpgradeImpact]:
+    """
+    Simulate upgrade impacts for all dependencies.
+    """
+    return {
+        dep.name: estimate_upgrade_impact(dep)
+        for dep in deps.values()
+    }
+
+
+# =============================================================================
+# Aggregated dependency insights
+# =============================================================================
+
+def compute_license_distribution(
+    deps: Dict[str, DependencyInfo],
+) -> Dict[str, int]:
+    """
+    Compute distribution of licenses across dependencies.
+    """
+    distribution: Dict[str, int] = {}
+
+    for dep in deps.values():
+        key = dep.license.value
+        distribution[key] = distribution.get(key, 0) + 1
+
+    return distribution
+
+
+def identify_high_risk_dependencies(
+    deps: Dict[str, DependencyInfo],
+    *,
+    threshold: float = 0.5,
+) -> List[str]:
+    """
+    Identify high-risk dependencies based on heuristics.
+    """
+    risky: List[str] = []
+
+    for dep in deps.values():
+        risk_score = 0.0
+
+        if dep.is_vulnerable():
+            risk_score += 0.4
+        if dep.version and dep.version.startswith("0."):
+            risk_score += 0.2
+        if dep.license in {LicenseType.GPL, LicenseType.PROPRIETARY}:
+            risk_score += 0.2
+
+        if risk_score >= threshold:
+            risky.append(dep.name)
+
+    return risky
+
+
+def build_dependency_insights(
+    analysis: DependencyAnalysis,
+) -> Dict[str, object]:
+    """
+    Build high-level insights from dependency analysis.
+    """
+    usage_profiles = build_usage_profiles(analysis.dependencies)
+    upgrade_impacts = simulate_upgrade_impacts(analysis.dependencies)
+
+    return {
+        "license_distribution": compute_license_distribution(
+            analysis.dependencies
+        ),
+        "high_risk_dependencies": identify_high_risk_dependencies(
+            analysis.dependencies
+        ),
+        "usage_profiles": {
+            name: {
+                "usage_type": profile.usage_type,
+                "criticality": profile.criticality,
+                "reasoning": profile.reasoning,
+            }
+            for name, profile in usage_profiles.items()
+        },
+        "upgrade_impacts": {
+            name: {
+                "current_version": impact.current_version,
+                "risk_level": impact.risk_level,
+                "estimated_effort": impact.estimated_effort,
+                "notes": impact.notes,
+            }
+            for name, impact in upgrade_impacts.items()
+        },
+    }
 
 # =============================================================================
 # End of dependency analyzer
