@@ -271,3 +271,222 @@ def test_build_dependency_insights(repo: Path):
     insights = build_dependency_insights(analysis)
     assert "license_distribution" in insights
     assert "usage_profiles" in insights
+
+# =============================================================================
+# Additional parsing edge cases
+# =============================================================================
+
+def test_requirements_with_comments_and_blank_lines(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    req = repo / "requirements.txt"
+    req.write_text(
+        """
+        # core dependencies
+        requests==2.31.0
+
+        # web framework
+        flask>=1.0
+        """,
+        encoding="utf-8",
+    )
+
+    deps = parse_requirements_txt(req)
+    assert "requests" in deps
+    assert "flask" in deps
+    assert deps["flask"].version is not None
+
+
+def test_package_json_optional_and_peer(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    pkg = repo / "package.json"
+    pkg.write_text(
+        json.dumps(
+            {
+                "dependencies": {"react": "^18.0.0"},
+                "peerDependencies": {"react-dom": "^18.0.0"},
+                "optionalDependencies": {"fsevents": "^2.3.2"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    deps = parse_package_json(pkg)
+    assert deps["react"].dependency_type == DependencyType.RUNTIME
+    assert deps["react-dom"].dependency_type == DependencyType.PEER
+    assert deps["fsevents"].dependency_type == DependencyType.OPTIONAL
+
+
+# =============================================================================
+# Deduplication robustness
+# =============================================================================
+
+def test_deduplicate_case_insensitive_names():
+    deps = {
+        "NumPy": DependencyInfo("NumPy", "1.24.0", DependencySource.PYTHON),
+        "numpy": DependencyInfo("numpy", "1.25.0", DependencySource.PYTHON),
+    }
+
+    deduped = deduplicate_dependencies(deps)
+    assert len(deduped) == 1
+
+
+def test_merge_preserves_vulnerabilities():
+    a = DependencyInfo(
+        "lib",
+        "0.1.0",
+        DependencySource.PYTHON,
+    )
+    b = DependencyInfo(
+        "lib",
+        "0.1.0",
+        DependencySource.PYTHON,
+    )
+
+    attach_vulnerabilities({"lib": a})
+    merged = merge_dependencies({"lib": a}, {"lib": b})
+
+    assert merged["lib"].vulnerabilities
+
+
+# =============================================================================
+# Conflict detection depth
+# =============================================================================
+
+def test_detect_version_conflict_multiple_versions():
+    deps = {
+        "pkg": DependencyInfo("pkg", "1.0.0", DependencySource.PYTHON),
+        "pkg_alt": DependencyInfo("pkg", "2.0.0", DependencySource.PYTHON),
+    }
+
+    conflicts = analyze_dependency_conflicts(deps)
+    assert conflicts["version_conflicts"]
+
+
+def test_detect_ecosystem_shadowing():
+    deps = {
+        "shared": DependencyInfo("shared", "1.0", DependencySource.PYTHON),
+        "shared_js": DependencyInfo("shared", "1.0", DependencySource.JAVASCRIPT),
+    }
+
+    conflicts = analyze_dependency_conflicts(deps)
+    assert conflicts["ecosystem_shadowing"]
+
+
+# =============================================================================
+# Explainability robustness
+# =============================================================================
+
+def test_explain_dependency_risk_no_issues():
+    dep = DependencyInfo(
+        "safe",
+        "1.2.3",
+        DependencySource.PYTHON,
+        license=LicenseType.MIT,
+    )
+
+    explanation = explain_dependency_risk(dep)
+    assert "No significant risk" in explanation
+
+
+def test_explain_dependency_risk_multiple_reasons():
+    dep = DependencyInfo(
+        "risky",
+        "0.1.0-alpha",
+        DependencySource.PYTHON,
+        license=LicenseType.GPL,
+    )
+
+    attach_vulnerabilities({"risky": dep})
+    explanation = explain_dependency_risk(dep)
+
+    assert "Risk due to" in explanation
+    assert "," in explanation
+
+
+# =============================================================================
+# Confidence scoring boundaries
+# =============================================================================
+
+def test_confidence_score_bounds():
+    dep = DependencyInfo(
+        "unknown",
+        None,
+        DependencySource.UNKNOWN,
+        license=LicenseType.UNKNOWN,
+    )
+
+    conf = compute_ecosystem_confidence(dep)
+    assert 0.0 <= conf.confidence_score <= 1.0
+
+
+# =============================================================================
+# Usage classification variations
+# =============================================================================
+
+def test_usage_classification_runtime():
+    dep = DependencyInfo(
+        "runtime_lib",
+        "1.0.0",
+        DependencySource.PYTHON,
+        dependency_type=DependencyType.RUNTIME,
+    )
+
+    profile = classify_dependency_usage(dep)
+    assert profile.usage_type == "runtime"
+
+
+def test_usage_classification_optional():
+    dep = DependencyInfo(
+        "opt",
+        "1.0.0",
+        DependencySource.PYTHON,
+        dependency_type=DependencyType.OPTIONAL,
+    )
+
+    profile = classify_dependency_usage(dep)
+    assert profile.criticality in {"low", "medium"}
+
+
+# =============================================================================
+# Upgrade impact simulation coverage
+# =============================================================================
+
+def test_upgrade_impact_unpinned_version():
+    dep = DependencyInfo(
+        "unpinned",
+        None,
+        DependencySource.PYTHON,
+    )
+
+    impact = estimate_upgrade_impact(dep)
+    assert impact.risk_level == "unknown"
+
+
+def test_upgrade_impact_tooling_dependency():
+    dep = DependencyInfo(
+        "tool",
+        "1.0.0",
+        DependencySource.PYTHON,
+        dependency_type=DependencyType.DEVELOPMENT,
+    )
+
+    impact = estimate_upgrade_impact(dep)
+    assert impact.estimated_effort == "low"
+
+
+# =============================================================================
+# Insights aggregation depth
+# =============================================================================
+
+def test_dependency_insights_contains_all_sections(repo: Path):
+    analysis = analyze_dependency_files(repo)
+    insights = build_dependency_insights(analysis)
+
+    assert "license_distribution" in insights
+    assert "high_risk_dependencies" in insights
+    assert "usage_profiles" in insights
+    assert "upgrade_impacts" in insights
